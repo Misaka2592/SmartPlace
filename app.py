@@ -9,8 +9,19 @@ from PIL import Image
 
 from utils.composer import compose_image, resize_foreground
 from utils.candidate_generator import generate_grid_candidates
-from utils.scoring import score_to_label, build_reason, rank_candidates, format_score
+from utils.scoring import (
+    score_to_label,
+    build_reason,
+    rank_candidates,
+    format_score,
+    analyze_candidate,
+    summarize_run,
+)
 from utils.logger import InferenceLogger
+from utils.exporter import (
+    export_markdown_report,
+    export_result_package_metadata,
+)
 from models.dummy_scorer import DummyScorer
 
 
@@ -18,11 +29,13 @@ OUTPUT_DIR = "outputs"
 COMPOSITE_DIR = os.path.join(OUTPUT_DIR, "composites")
 TABLE_DIR = os.path.join(OUTPUT_DIR, "tables")
 LOG_DIR = os.path.join(OUTPUT_DIR, "logs")
+REPORT_RESULT_DIR = os.path.join("report", "results")
 CONFIG_PATH = "configs/default.yaml"
 
 os.makedirs(COMPOSITE_DIR, exist_ok=True)
 os.makedirs(TABLE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(REPORT_RESULT_DIR, exist_ok=True)
 
 
 def load_config(config_path: str = CONFIG_PATH) -> Dict:
@@ -36,6 +49,7 @@ def load_config(config_path: str = CONFIG_PATH) -> Dict:
 
 
 cfg = load_config()
+
 logger = InferenceLogger(
     log_dir=LOG_DIR,
     enable_file_log=cfg.get("output", {}).get("save_log", True),
@@ -76,6 +90,43 @@ def build_model_info_text() -> str:
         "",
         "说明：当前为 DummyScorerV2，占位规则模型。它用于模拟真实模型推理接口和日志，后续可替换为 OPA/FOPA。",
     ]
+
+    return "\n".join(lines)
+
+
+def build_run_analysis_text(summary: Dict, ranked: List[Dict]) -> str:
+    lines = []
+
+    lines.append("【本次运行统计】")
+    lines.append(f"候选总数：{summary['total_candidates']}")
+    lines.append(f"推荐数量：{summary['recommend_count']}")
+    lines.append(f"可接受数量：{summary['acceptable_count']}")
+    lines.append(f"不推荐数量：{summary['not_recommend_count']}")
+    lines.append(f"最佳候选编号：{summary['best_candidate_id']}")
+    lines.append(f"最佳候选分数：{summary['best_score']:.4f}")
+    lines.append(f"平均分数：{summary['average_score']:.4f}")
+
+    lines.append("")
+    lines.append("【Top-K 推荐解释】")
+
+    for rank, item in enumerate(ranked, start=1):
+        lines.append(
+            f"Top {rank}：候选 {item['id']}，"
+            f"位置=({item['x']}, {item['y']})，"
+            f"分数={item['score']:.4f}，"
+            f"评价={item['label']}。"
+        )
+        lines.append(f"理由：{item['reason']}")
+        lines.append(f"结论：{item.get('conclusion', '')}")
+        lines.append("")
+
+    lines.append("【模型改造说明】")
+    lines.append(
+        "基础模型小改动：将模型原始输出转换为 0~1 合理性分数，并映射为“推荐 / 可接受 / 不推荐”三档评价。"
+    )
+    lines.append(
+        "进阶模型改造：将单图评分扩展为多候选批量评分、降序排序和 Top-K 推荐。"
+    )
 
     return "\n".join(lines)
 
@@ -148,7 +199,8 @@ def run_smartplace(
 
     for cand, composite, info, score in zip(candidates, composites, candidate_infos, scores):
         label = score_to_label(score)
-        reason = build_reason(score, info)
+        analysis = analyze_candidate(info, score)
+        reason = analysis["reason"]
 
         result = {
             "id": cand["id"],
@@ -158,6 +210,12 @@ def run_smartplace(
             "score": score,
             "label": label,
             "reason": reason,
+            "conclusion": analysis["conclusion"],
+            "problems": analysis["problems"],
+            "strengths": analysis["strengths"],
+            "area_ratio": analysis["area_ratio"],
+            "x_center_ratio": analysis["x_center_ratio"],
+            "y_center_ratio": analysis["y_center_ratio"],
             "out_of_bounds": info["out_of_bounds"],
             "fg_width": info["fg_width"],
             "fg_height": info["fg_height"],
@@ -167,6 +225,7 @@ def run_smartplace(
         results.append(result)
 
     ranked = rank_candidates(results, top_k=int(top_k))
+    summary = summarize_run(results, top_k=int(top_k))
 
     if cfg.get("output", {}).get("save_images", True):
         save_candidate_images(results)
@@ -183,7 +242,9 @@ def run_smartplace(
                 "分数": format_score(item["score"]),
                 "评价": item["label"],
                 "是否越界": "是" if item["out_of_bounds"] else "否",
+                "面积占比": f"{item['area_ratio']:.4f}",
                 "推荐理由/失败提示": item["reason"],
+                "结论": item["conclusion"],
             }
         )
 
@@ -206,7 +267,6 @@ def run_smartplace(
         gallery_items.append((item["image"], caption))
 
     topk_gallery = []
-    topk_text_lines = []
 
     for rank, item in enumerate(ranked, start=1):
         caption = (
@@ -216,21 +276,48 @@ def run_smartplace(
         )
         topk_gallery.append((item["image"], caption))
 
-        topk_text_lines.append(
-            f"Top {rank}: 候选 {item['id']}，"
-            f"位置=({item['x']}, {item['y']})，"
-            f"分数={item['score']:.4f}，"
-            f"评价={item['label']}，"
-            f"原因：{item['reason']}"
-        )
+    run_analysis_text = build_run_analysis_text(summary, ranked)
 
-    topk_text = "\n\n".join(topk_text_lines)
+    model_info = scorer.get_model_info()
+    log_path = logger.get_log_path()
+
+    report_path = export_markdown_report(
+        results=results,
+        ranked=ranked,
+        summary=summary,
+        model_info=model_info,
+        output_dir=REPORT_RESULT_DIR,
+        csv_path=csv_path,
+        log_path=log_path,
+    )
+
+    metadata_path = export_result_package_metadata(
+        results=results,
+        ranked=ranked,
+        summary=summary,
+        model_info=model_info,
+        output_dir=REPORT_RESULT_DIR,
+        csv_path=csv_path,
+        log_path=log_path,
+        report_path=report_path,
+    )
 
     logger.log("[SmartPlace] Inference finished.")
     logger.log(f"[Output] score_table_saved={csv_path}")
-    logger.log(f"[Output] log_file={logger.get_log_path()}")
+    logger.log(f"[Output] report_saved={report_path}")
+    logger.log(f"[Output] metadata_saved={metadata_path}")
+    logger.log(f"[Output] log_file={log_path}")
 
-    return gallery_items, topk_gallery, df, topk_text, csv_path, logger.get_log_path()
+    return (
+        gallery_items,
+        topk_gallery,
+        df,
+        run_analysis_text,
+        csv_path,
+        log_path,
+        report_path,
+        metadata_path,
+    )
 
 
 with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
@@ -238,14 +325,15 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
         """
         # SmartPlace：智能物体放置与合成图质量评价系统
 
-        当前版本：v0.2 推理接口规范版。
+        当前版本：v0.3 评分点材料化版本。
 
         本版本新增：
-        - 模型统一接口 `BaseScorer`
-        - 批量评分接口 `batch_score`
-        - 推理日志 `InferenceLogger`
-        - 模型信息展示
-        - 终端打印模型加载、输入 tensor shape、输出 score、推理时间
+        - 更完整的失败提示
+        - 候选分析统计
+        - Top-K 推荐解释
+        - 自动导出 Markdown 分析报告
+        - 自动导出 JSON 元信息
+        - 更适合报告和 PPT 展示的模型改造证据
         """
     )
 
@@ -322,19 +410,29 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
         wrap=True,
     )
 
-    gr.Markdown("## 推荐说明")
-    topk_text = gr.Textbox(
-        label="Top-K 推荐说明",
-        lines=8,
+    gr.Markdown("## 本次实验分析说明")
+    run_analysis_text = gr.Textbox(
+        label="自动生成的分析说明",
+        lines=16,
     )
 
+    gr.Markdown("## 导出文件")
     with gr.Row():
         csv_file = gr.File(
-            label="导出的评分 CSV",
+            label="评分 CSV",
         )
 
         log_file = gr.File(
-            label="导出的推理日志",
+            label="推理日志",
+        )
+
+    with gr.Row():
+        report_file = gr.File(
+            label="Markdown 分析报告",
+        )
+
+        metadata_file = gr.File(
+            label="JSON 元信息",
         )
 
     run_button.click(
@@ -351,9 +449,11 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
             candidate_gallery,
             topk_gallery,
             score_table,
-            topk_text,
+            run_analysis_text,
             csv_file,
             log_file,
+            report_file,
+            metadata_file,
         ],
     )
 
