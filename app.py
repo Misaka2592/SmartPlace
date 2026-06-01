@@ -25,6 +25,10 @@ from utils.explain import (
     generate_occlusion_heatmap,
     export_explanation_markdown,
 )
+from utils.mask_processor import (
+    process_foreground_for_composition,
+    save_processed_foreground,
+)
 from models.dummy_scorer import DummyScorer
 
 
@@ -33,6 +37,7 @@ COMPOSITE_DIR = os.path.join(OUTPUT_DIR, "composites")
 TABLE_DIR = os.path.join(OUTPUT_DIR, "tables")
 LOG_DIR = os.path.join(OUTPUT_DIR, "logs")
 EXPLAIN_DIR = os.path.join(OUTPUT_DIR, "explanations")
+MASK_DIR = os.path.join(OUTPUT_DIR, "masks")
 REPORT_RESULT_DIR = os.path.join("report", "results")
 CONFIG_PATH = "configs/default.yaml"
 
@@ -40,6 +45,7 @@ os.makedirs(COMPOSITE_DIR, exist_ok=True)
 os.makedirs(TABLE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(EXPLAIN_DIR, exist_ok=True)
+os.makedirs(MASK_DIR, exist_ok=True)
 os.makedirs(REPORT_RESULT_DIR, exist_ok=True)
 
 
@@ -102,6 +108,7 @@ def build_model_info_text() -> str:
 def build_run_analysis_text(
     summary: Dict,
     ranked: List[Dict],
+    mask_info: Dict,
     explanation_text: str = "",
 ) -> str:
     lines = []
@@ -114,6 +121,21 @@ def build_run_analysis_text(
     lines.append(f"最佳候选编号：{summary['best_candidate_id']}")
     lines.append(f"最佳候选分数：{summary['best_score']:.4f}")
     lines.append(f"平均分数：{summary['average_score']:.4f}")
+
+    lines.append("")
+    lines.append("【前景处理说明】")
+    lines.append(f"请求模式：{mask_info.get('requested_mode')}")
+    lines.append(f"实际使用：{mask_info.get('mode_used')}")
+    lines.append(f"输入尺寸：{mask_info.get('input_size')}")
+    lines.append(f"输出尺寸：{mask_info.get('output_size')}")
+    lines.append(f"前景像素占比：{mask_info.get('foreground_pixel_ratio', 0):.4f}")
+
+    if "auto_decision" in mask_info:
+        lines.append(f"自动判断结果：{mask_info.get('auto_decision')}")
+
+    if "estimated_background_color" in mask_info:
+        bg_color = mask_info.get("estimated_background_color")
+        lines.append(f"估计背景颜色：{bg_color}")
 
     lines.append("")
     lines.append("【Top-K 推荐解释】")
@@ -137,6 +159,12 @@ def build_run_analysis_text(
         "进阶模型改造：将单图评分扩展为多候选批量评分、降序排序和 Top-K 推荐。"
     )
 
+    lines.append("")
+    lines.append("【多工具串联说明】")
+    lines.append(
+        "当前系统流程为：前景 mask 处理工具 → 候选位置生成 → 图像合成 → 评分模型 → 遮挡解释模块 → Web 展示与结果导出。"
+    )
+
     if explanation_text:
         lines.append("")
         lines.append(explanation_text)
@@ -147,6 +175,8 @@ def build_run_analysis_text(
 def run_smartplace(
     background_image,
     foreground_image,
+    mask_mode,
+    white_bg_threshold,
     candidate_count,
     scale,
     top_k,
@@ -159,10 +189,29 @@ def run_smartplace(
         raise gr.Error("请上传背景图。")
 
     if foreground_image is None:
-        raise gr.Error("请上传前景图，建议使用透明 PNG。")
+        raise gr.Error("请上传前景图。透明 PNG 效果最好，白底图片也可以尝试自动去底。")
 
     background = Image.fromarray(background_image).convert("RGB")
-    foreground = Image.fromarray(foreground_image).convert("RGBA")
+    raw_foreground = Image.fromarray(foreground_image).convert("RGBA")
+
+    mask_cfg = cfg.get("mask_processor", {})
+
+    foreground, mask_preview, mask_info = process_foreground_for_composition(
+        image=raw_foreground,
+        mode=mask_mode,
+        white_bg_threshold=int(white_bg_threshold),
+        edge_sample_ratio=float(mask_cfg.get("edge_sample_ratio", 0.08)),
+    )
+
+    processed_fg_path = None
+    mask_path = None
+
+    if cfg.get("output", {}).get("save_mask", True):
+        processed_fg_path, mask_path = save_processed_foreground(
+            foreground_rgba=foreground,
+            mask_preview=mask_preview,
+            output_dir=MASK_DIR,
+        )
 
     bg_w, bg_h = background.size
 
@@ -184,7 +233,12 @@ def run_smartplace(
 
     logger.section("[SmartPlace] Start one demo inference")
     logger.log(f"[Input] background_size={background.size}")
-    logger.log(f"[Input] original_foreground_size={foreground.size}")
+    logger.log(f"[Input] raw_foreground_size={raw_foreground.size}")
+    logger.log(f"[Mask] requested_mode={mask_info.get('requested_mode')}")
+    logger.log(f"[Mask] mode_used={mask_info.get('mode_used')}")
+    logger.log(f"[Mask] foreground_pixel_ratio={mask_info.get('foreground_pixel_ratio')}")
+    logger.log(f"[Mask] processed_foreground_path={processed_fg_path}")
+    logger.log(f"[Mask] mask_path={mask_path}")
     logger.log(f"[Input] resized_foreground_size={resized_fg.size}")
     logger.log(f"[Param] candidate_count={candidate_count}")
     logger.log(f"[Param] scale={scale}")
@@ -341,6 +395,7 @@ def run_smartplace(
     run_analysis_text = build_run_analysis_text(
         summary=summary,
         ranked=ranked,
+        mask_info=mask_info,
         explanation_text=explanation_text,
     )
 
@@ -371,17 +426,23 @@ def run_smartplace(
     )
 
     logger.log("[SmartPlace] Inference finished.")
+    logger.log(f"[Output] processed_foreground={processed_fg_path}")
+    logger.log(f"[Output] mask_preview={mask_path}")
     logger.log(f"[Output] score_table_saved={csv_path}")
     logger.log(f"[Output] report_saved={report_path}")
     logger.log(f"[Output] metadata_saved={metadata_path}")
     logger.log(f"[Output] log_file={log_path}")
 
     return (
+        mask_preview,
+        foreground,
         gallery_items,
         topk_gallery,
         df,
         run_analysis_text,
         explanation_gallery,
+        processed_fg_path,
+        mask_path,
         csv_path,
         log_path,
         report_path,
@@ -395,14 +456,14 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
         """
         # SmartPlace：智能物体放置与合成图质量评价系统
 
-        当前版本：v0.4 模型解释版本。
+        当前版本：v0.5 前景 mask / 多工具串联版本。
 
         本版本新增：
-        - 遮挡实验 Occlusion Sensitivity
-        - Top-1 推荐结果解释图
-        - 解释图 PNG 导出
-        - 解释说明 Markdown 导出
-        - 运行报告中记录解释结果
+        - 透明 PNG alpha mask 读取
+        - 白底 / 浅色背景自动去除
+        - 前景 mask 预览
+        - 处理后 RGBA 前景导出
+        - 前景处理工具 → 候选生成 → 合成 → 评分 → 解释 → 展示 的多工具串联流程
         """
     )
 
@@ -413,8 +474,27 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
                 type="numpy",
             )
             foreground_input = gr.Image(
-                label="前景图，建议透明 PNG",
+                label="前景图，透明 PNG 最佳；白底图也可尝试自动去底",
                 type="numpy",
+            )
+
+            mask_mode_input = gr.Radio(
+                choices=[
+                    "自动判断",
+                    "透明 PNG Alpha",
+                    "白底/浅色背景去除",
+                    "不处理",
+                ],
+                value=cfg.get("mask_processor", {}).get("default_mode", "自动判断"),
+                label="前景处理模式",
+            )
+
+            white_bg_threshold_input = gr.Slider(
+                minimum=10,
+                maximum=100,
+                value=cfg.get("mask_processor", {}).get("white_bg_threshold", 38),
+                step=2,
+                label="白底/浅色背景去除阈值",
             )
 
         with gr.Column():
@@ -476,9 +556,20 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
             )
 
             run_button = gr.Button(
-                value="生成候选、评分并解释",
+                value="处理前景、生成候选、评分并解释",
                 variant="primary",
             )
+
+    gr.Markdown("## 前景 mask 处理结果")
+    with gr.Row():
+        mask_preview_output = gr.Image(
+            label="前景 Mask 预览",
+            type="pil",
+        )
+        processed_foreground_output = gr.Image(
+            label="处理后 RGBA 前景",
+            type="pil",
+        )
 
     gr.Markdown("## 全部候选结果")
     candidate_gallery = gr.Gallery(
@@ -503,7 +594,7 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
     gr.Markdown("## 本次实验分析说明")
     run_analysis_text = gr.Textbox(
         label="自动生成的分析说明",
-        lines=18,
+        lines=22,
     )
 
     gr.Markdown("## 模型解释图")
@@ -515,10 +606,12 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
 
     gr.Markdown("## 导出文件")
     with gr.Row():
+        processed_fg_file = gr.File(label="处理后前景 PNG")
+        mask_file = gr.File(label="Mask 预览 PNG")
         csv_file = gr.File(label="评分 CSV")
-        log_file = gr.File(label="推理日志")
 
     with gr.Row():
+        log_file = gr.File(label="推理日志")
         report_file = gr.File(label="Markdown 运行报告")
         metadata_file = gr.File(label="JSON 元信息")
 
@@ -529,6 +622,8 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
         inputs=[
             background_input,
             foreground_input,
+            mask_mode_input,
+            white_bg_threshold_input,
             candidate_count_input,
             scale_input,
             top_k_input,
@@ -538,11 +633,15 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
             occlusion_stride_input,
         ],
         outputs=[
+            mask_preview_output,
+            processed_foreground_output,
             candidate_gallery,
             topk_gallery,
             score_table,
             run_analysis_text,
             explanation_gallery,
+            processed_fg_file,
+            mask_file,
             csv_file,
             log_file,
             report_file,

@@ -1,13 +1,18 @@
 project:
   name: SmartPlace
-  version: v0.2
+  version: v0.5
 
 scorer:
-  name: DummyScorerV2
+  name: DummyScorerV4
   weight_path: weights/dummy_scorer_rule_based.pth
   device: cpu
   input_size: 224
   batch_size: 8
+
+mask_processor:
+  default_mode: 自动判断
+  white_bg_threshold: 38
+  edge_sample_ratio: 0.08
 
 threshold:
   recommend: 0.75
@@ -17,3 +22,4 @@ output:
   save_images: true
   save_csv: true
   save_log: true
+  save_mask: true
