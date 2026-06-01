@@ -11,7 +11,6 @@ from utils.composer import compose_image, resize_foreground
 from utils.candidate_generator import generate_grid_candidates
 from utils.scoring import (
     score_to_label,
-    build_reason,
     rank_candidates,
     format_score,
     analyze_candidate,
@@ -22,6 +21,10 @@ from utils.exporter import (
     export_markdown_report,
     export_result_package_metadata,
 )
+from utils.explain import (
+    generate_occlusion_heatmap,
+    export_explanation_markdown,
+)
 from models.dummy_scorer import DummyScorer
 
 
@@ -29,12 +32,14 @@ OUTPUT_DIR = "outputs"
 COMPOSITE_DIR = os.path.join(OUTPUT_DIR, "composites")
 TABLE_DIR = os.path.join(OUTPUT_DIR, "tables")
 LOG_DIR = os.path.join(OUTPUT_DIR, "logs")
+EXPLAIN_DIR = os.path.join(OUTPUT_DIR, "explanations")
 REPORT_RESULT_DIR = os.path.join("report", "results")
 CONFIG_PATH = "configs/default.yaml"
 
 os.makedirs(COMPOSITE_DIR, exist_ok=True)
 os.makedirs(TABLE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(EXPLAIN_DIR, exist_ok=True)
 os.makedirs(REPORT_RESULT_DIR, exist_ok=True)
 
 
@@ -88,13 +93,17 @@ def build_model_info_text() -> str:
         f"输入尺寸：{info['input_size']}",
         f"加载状态：{'已加载' if info['is_loaded'] else '未加载'}",
         "",
-        "说明：当前为 DummyScorerV2，占位规则模型。它用于模拟真实模型推理接口和日志，后续可替换为 OPA/FOPA。",
+        "说明：当前为 DummyScorerV4，占位规则模型。它用于模拟真实模型推理接口、日志和遮挡解释，后续可替换为 OPA/FOPA。",
     ]
 
     return "\n".join(lines)
 
 
-def build_run_analysis_text(summary: Dict, ranked: List[Dict]) -> str:
+def build_run_analysis_text(
+    summary: Dict,
+    ranked: List[Dict],
+    explanation_text: str = "",
+) -> str:
     lines = []
 
     lines.append("【本次运行统计】")
@@ -128,6 +137,10 @@ def build_run_analysis_text(summary: Dict, ranked: List[Dict]) -> str:
         "进阶模型改造：将单图评分扩展为多候选批量评分、降序排序和 Top-K 推荐。"
     )
 
+    if explanation_text:
+        lines.append("")
+        lines.append(explanation_text)
+
     return "\n".join(lines)
 
 
@@ -138,6 +151,9 @@ def run_smartplace(
     scale,
     top_k,
     filter_out_of_bounds,
+    enable_explanation,
+    occlusion_patch_size,
+    occlusion_stride,
 ):
     if background_image is None:
         raise gr.Error("请上传背景图。")
@@ -174,6 +190,9 @@ def run_smartplace(
     logger.log(f"[Param] scale={scale}")
     logger.log(f"[Param] top_k={top_k}")
     logger.log(f"[Param] filter_out_of_bounds={filter_out_of_bounds}")
+    logger.log(f"[Param] enable_explanation={enable_explanation}")
+    logger.log(f"[Param] occlusion_patch_size={occlusion_patch_size}")
+    logger.log(f"[Param] occlusion_stride={occlusion_stride}")
 
     composites = []
     candidate_infos = []
@@ -219,6 +238,7 @@ def run_smartplace(
             "out_of_bounds": info["out_of_bounds"],
             "fg_width": info["fg_width"],
             "fg_height": info["fg_height"],
+            "candidate_info": info,
             "image": composite,
         }
 
@@ -229,6 +249,48 @@ def run_smartplace(
 
     if cfg.get("output", {}).get("save_images", True):
         save_candidate_images(results)
+
+    explanation_gallery = []
+    explanation_text = ""
+    explanation_overlay_path = None
+    explanation_report_path = None
+
+    if enable_explanation and ranked:
+        top1 = ranked[0]
+
+        logger.section("[SmartPlace] Start explanation for Top-1 candidate")
+        logger.log(f"[Explain] candidate_id={top1['id']}")
+
+        explanation_result = generate_occlusion_heatmap(
+            scorer=scorer,
+            image=top1["image"],
+            candidate_info=top1["candidate_info"],
+            patch_size=int(occlusion_patch_size),
+            stride=int(occlusion_stride),
+            output_dir=EXPLAIN_DIR,
+            prefix=f"candidate_{top1['id']}",
+        )
+
+        explanation_overlay_path = explanation_result["overlay_path"]
+
+        explanation_report_path = export_explanation_markdown(
+            explanation_result=explanation_result,
+            candidate_id=top1["id"],
+            output_dir=REPORT_RESULT_DIR,
+        )
+
+        explanation_text = explanation_result["explanation"]
+
+        explanation_gallery.append(
+            (
+                explanation_result["overlay_path"],
+                f"候选 {top1['id']} 遮挡实验热力图叠加结果",
+            )
+        )
+
+        logger.log(f"[Explain] heatmap_path={explanation_result['heatmap_path']}")
+        logger.log(f"[Explain] overlay_path={explanation_result['overlay_path']}")
+        logger.log(f"[Explain] report_path={explanation_report_path}")
 
     table_rows = []
 
@@ -276,7 +338,11 @@ def run_smartplace(
         )
         topk_gallery.append((item["image"], caption))
 
-    run_analysis_text = build_run_analysis_text(summary, ranked)
+    run_analysis_text = build_run_analysis_text(
+        summary=summary,
+        ranked=ranked,
+        explanation_text=explanation_text,
+    )
 
     model_info = scorer.get_model_info()
     log_path = logger.get_log_path()
@@ -289,6 +355,8 @@ def run_smartplace(
         output_dir=REPORT_RESULT_DIR,
         csv_path=csv_path,
         log_path=log_path,
+        explanation_path=explanation_overlay_path,
+        explanation_report_path=explanation_report_path,
     )
 
     metadata_path = export_result_package_metadata(
@@ -313,10 +381,12 @@ def run_smartplace(
         topk_gallery,
         df,
         run_analysis_text,
+        explanation_gallery,
         csv_path,
         log_path,
         report_path,
         metadata_path,
+        explanation_report_path,
     )
 
 
@@ -325,15 +395,14 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
         """
         # SmartPlace：智能物体放置与合成图质量评价系统
 
-        当前版本：v0.3 评分点材料化版本。
+        当前版本：v0.4 模型解释版本。
 
         本版本新增：
-        - 更完整的失败提示
-        - 候选分析统计
-        - Top-K 推荐解释
-        - 自动导出 Markdown 分析报告
-        - 自动导出 JSON 元信息
-        - 更适合报告和 PPT 展示的模型改造证据
+        - 遮挡实验 Occlusion Sensitivity
+        - Top-1 推荐结果解释图
+        - 解释图 PNG 导出
+        - 解释说明 Markdown 导出
+        - 运行报告中记录解释结果
         """
     )
 
@@ -385,8 +454,29 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
                 label="过滤明显越界候选",
             )
 
+            enable_explanation_input = gr.Checkbox(
+                value=True,
+                label="生成模型解释图",
+            )
+
+            occlusion_patch_size_input = gr.Slider(
+                minimum=24,
+                maximum=96,
+                value=48,
+                step=8,
+                label="遮挡块大小",
+            )
+
+            occlusion_stride_input = gr.Slider(
+                minimum=16,
+                maximum=64,
+                value=32,
+                step=8,
+                label="遮挡滑动步长",
+            )
+
             run_button = gr.Button(
-                value="生成候选并评分",
+                value="生成候选、评分并解释",
                 variant="primary",
             )
 
@@ -413,27 +503,26 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
     gr.Markdown("## 本次实验分析说明")
     run_analysis_text = gr.Textbox(
         label="自动生成的分析说明",
-        lines=16,
+        lines=18,
+    )
+
+    gr.Markdown("## 模型解释图")
+    explanation_gallery = gr.Gallery(
+        label="遮挡实验热力图",
+        columns=1,
+        height="auto",
     )
 
     gr.Markdown("## 导出文件")
     with gr.Row():
-        csv_file = gr.File(
-            label="评分 CSV",
-        )
-
-        log_file = gr.File(
-            label="推理日志",
-        )
+        csv_file = gr.File(label="评分 CSV")
+        log_file = gr.File(label="推理日志")
 
     with gr.Row():
-        report_file = gr.File(
-            label="Markdown 分析报告",
-        )
+        report_file = gr.File(label="Markdown 运行报告")
+        metadata_file = gr.File(label="JSON 元信息")
 
-        metadata_file = gr.File(
-            label="JSON 元信息",
-        )
+    explanation_report_file = gr.File(label="模型解释 Markdown 报告")
 
     run_button.click(
         fn=run_smartplace,
@@ -444,16 +533,21 @@ with gr.Blocks(title="SmartPlace 智能物体放置推荐系统") as demo:
             scale_input,
             top_k_input,
             filter_out_of_bounds_input,
+            enable_explanation_input,
+            occlusion_patch_size_input,
+            occlusion_stride_input,
         ],
         outputs=[
             candidate_gallery,
             topk_gallery,
             score_table,
             run_analysis_text,
+            explanation_gallery,
             csv_file,
             log_file,
             report_file,
             metadata_file,
+            explanation_report_file,
         ],
     )
 

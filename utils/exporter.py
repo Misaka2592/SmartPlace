@@ -33,6 +33,8 @@ def export_markdown_report(
     output_dir: str,
     csv_path: str,
     log_path: str,
+    explanation_path: str = None,
+    explanation_report_path: str = None,
 ) -> str:
     """
     导出一次运行的 Markdown 分析报告。
@@ -121,7 +123,24 @@ def export_markdown_report(
         "raw output、score 和 inference time，可用于课堂现场核验。"
     )
 
-    lines.append("\n## 8. 当前版本说明\n")
+    lines.append("## 8. 模型解释结果\n")
+
+    if explanation_path:
+        lines.append(f"- 解释图路径：`{explanation_path}`")
+    else:
+        lines.append("- 本次运行未生成解释图。")
+
+    if explanation_report_path:
+        lines.append(f"- 解释说明文件：`{explanation_report_path}`")
+
+    lines.append(
+        "本项目采用遮挡实验作为模型解释方法。系统使用灰色遮挡块依次遮挡候选合成图的局部区域，"
+        "并重新计算模型评分。若遮挡某一区域后分数明显下降，则说明该区域对模型判断更重要。"
+    )
+    lines.append("")
+
+
+    lines.append("\n## 9. 当前版本说明\n")
     lines.append(
         "当前版本使用 DummyScorerV2 作为占位评分器。"
         "它不代表最终真实模型效果，但已经完成了真实模型接入前所需的工程接口、"
