@@ -405,6 +405,17 @@ html, body { background: var(--sp-bg) !important; }
   padding: 0 !important;
   background: #f7f8fb !important;
 }
+.gradio-container main,
+.gradio-container .contain,
+.gradio-container .tabs,
+.gradio-container .tabitem {
+  max-width: none !important;
+}
+.gradio-container main.contain {
+  width: calc(100vw - 56px) !important;
+  max-width: 1920px !important;
+  margin: 0 auto !important;
+}
 #sp-app-frame {
   max-width: 1680px;
   margin: 0 auto;
@@ -586,17 +597,17 @@ input, textarea { background: #ffffff !important; border-color: var(--sp-border)
 }
 #sp-app-frame {
   max-width: 1920px !important;
-  padding: 8px 14px 18px !important;
+  padding: 18px 28px 28px !important;
 }
 .sp-brand { display: none !important; }
 .tab-nav {
   margin-top: 0 !important;
 }
-.sp-card { padding: 12px !important; }
-.sp-card-tight { padding: 12px !important; }
+.sp-card { padding: 20px !important; }
+.sp-card-tight { padding: 18px !important; }
 .sp-section-title {
-  font-size: 15px !important;
-  margin-bottom: 4px !important;
+  font-size: 18px !important;
+  margin-bottom: 12px !important;
 }
 .sp-subtitle {
   display: none !important;
@@ -605,51 +616,84 @@ input, textarea { background: #ffffff !important; border-color: var(--sp-border)
   line-height: 1.45 !important;
 }
 button, .gradio-button {
-  min-height: 34px !important;
-  font-size: 13px !important;
+  min-height: 44px !important;
+  font-size: 14px !important;
 }
 .tab-nav button {
-  min-height: 38px !important;
-  padding: 8px 14px !important;
+  min-height: 44px !important;
+  padding: 10px 18px !important;
   font-size: 14px !important;
 }
 .sp-preview-card {
-  min-height: 250px !important;
+  min-height: 330px !important;
 }
 .sp-preview-card .image-container,
 .sp-preview-card [data-testid="image"],
 .sp-preview-card img {
-  min-height: 145px !important;
+  min-height: 235px !important;
 }
 #canvas-shell iframe {
-  min-height: 430px !important;
-  max-height: 520px !important;
+  min-height: 520px !important;
+  max-height: 680px !important;
 }
 #workspace-main-row {
   flex-wrap: nowrap !important;
-  gap: 12px !important;
+  gap: 20px !important;
+  align-items: flex-start !important;
+  overflow-x: auto !important;
+  padding-bottom: 8px !important;
 }
 #sp-left-panel {
-  flex: 0 0 300px !important;
-  min-width: 280px !important;
-  max-width: 320px !important;
+  flex: 0 1 clamp(360px, 22vw, 440px) !important;
+  min-width: 360px !important;
+  max-width: 460px !important;
 }
 #sp-center-panel {
   flex: 1 1 auto !important;
-  min-width: 460px !important;
+  min-width: 560px !important;
 }
 #sp-right-panel {
-  flex: 0 0 310px !important;
-  min-width: 290px !important;
-  max-width: 330px !important;
+  flex: 0 1 clamp(380px, 23vw, 500px) !important;
+  min-width: 380px !important;
+  max-width: 500px !important;
 }
 #sp-left-panel .sp-card {
-  max-height: calc(100vh - 120px);
+  max-height: calc(100vh - 150px);
   overflow-y: auto;
 }
 #sp-right-panel .sp-card {
-  max-height: calc(100vh - 120px);
+  max-height: calc(100vh - 150px);
   overflow-y: auto;
+  overflow-x: hidden;
+}
+#sp-right-panel .accordion,
+#sp-right-panel .form,
+#sp-right-panel .block,
+#sp-right-panel .wrap {
+  max-width: 100% !important;
+  overflow-x: hidden !important;
+  box-sizing: border-box !important;
+}
+#sp-right-panel label,
+#sp-right-panel .label-wrap,
+#sp-right-panel .prose {
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+}
+#sp-right-panel .accordion {
+  border: 1px solid var(--sp-border) !important;
+  box-shadow: none !important;
+}
+#sp-right-panel .accordion button {
+  width: 100% !important;
+  border: 0 !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+#sp-right-panel .accordion:focus-within,
+#sp-right-panel .accordion button:focus {
+  outline: none !important;
+  box-shadow: none !important;
 }
 """
 
@@ -1543,6 +1587,7 @@ APP_THEME = gr.themes.Soft(
 
 with gr.Blocks(
     title="SmartPlace Studio · 智能物体放置展示平台",
+    fill_width=True,
 ) as demo:
     bg_state = gr.State(value=None)
     fg_state = gr.State(value=None)
@@ -1612,10 +1657,10 @@ with gr.Blocks(
     with gr.Tabs():
         with gr.Tab("01 · 创作工作台", id="workspace"):
             with gr.Row(equal_height=False, elem_id="workspace-main-row"):
-                with gr.Column(scale=3, min_width=280, elem_id="sp-left-panel"):
+                with gr.Column(scale=3, min_width=360, elem_id="sp-left-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>前景图片区域</div><div class='sp-subtitle'>预制前景图片 / 本地上传</div>")
-                        foreground_input = gr.Image(label="前景物体 Foreground", type="numpy", height=120)
+                        foreground_input = gr.Image(label="前景物体 Foreground", type="numpy", height=190)
                         gr.Examples(
                             examples=[
                                 os.path.join("assets", "foregrounds", "cup.png"),
@@ -1626,7 +1671,7 @@ with gr.Blocks(
                             label="预制前景图片",
                         )
                         gr.HTML("<div class='sp-section-title'>背景图片区域</div><div class='sp-subtitle'>预制背景图片 / 本地上传</div>")
-                        background_input = gr.Image(label="背景图 Background", type="numpy", height=120)
+                        background_input = gr.Image(label="背景图 Background", type="numpy", height=190)
                         gr.Examples(
                             examples=[
                                 os.path.join("assets", "backgrounds", "desk.png"),
@@ -1643,13 +1688,14 @@ with gr.Blocks(
                     manual_label_input = gr.State("未填写")
                     manual_reason_input = gr.State("")
 
-                with gr.Column(scale=6, min_width=460, elem_id="sp-center-panel"):
+                with gr.Column(scale=6, min_width=560, elem_id="sp-center-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>交互画布</div><div class='sp-subtitle'>在画布中拖动物体，记录多个候选位置后再统一评分。</div>")
                         drag_canvas_html = gr.HTML(label="拖拽画布", elem_id="canvas-shell")
                         with gr.Row():
                             load_canvas_button = gr.Button("加载 / 刷新拖拽画布", variant="primary", elem_classes=["sp-blue"])
                             add_candidate_button = gr.Button("记录当前位置为候选", variant="secondary")
+                        with gr.Row():
                             clear_candidate_button = gr.Button("清空候选", elem_classes=["sp-danger"])
                             score_button = gr.Button("批量评分并生成结果", variant="primary", elem_classes=["sp-green"])
 
@@ -1670,14 +1716,10 @@ with gr.Blocks(
                             drag_y_input = gr.Textbox(label="当前 y", value="0", elem_id="drag_y_input")
                             drag_scale_input = gr.Textbox(label="当前 scale", value="0.25", elem_id="drag_scale_input")
 
-                with gr.Column(scale=3, min_width=290, elem_id="sp-right-panel"):
+                with gr.Column(scale=3, min_width=380, elem_id="sp-right-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>模型与参数</div><div class='sp-subtitle'>参数越少越适合演示，更多选项已收纳。</div>")
-                        mask_mode_input = gr.Radio(
-                            choices=["自动判断", "透明 PNG Alpha", "白底/浅色背景去除", "不处理"],
-                            value=cfg.get("mask_processor", {}).get("default_mode", "自动判断"),
-                            label="前景处理模式",
-                        )
+                        mask_mode_input = gr.State(cfg.get("mask_processor", {}).get("default_mode", "自动判断"))
                         white_bg_threshold_input = gr.Slider(
                             minimum=10,
                             maximum=100,
