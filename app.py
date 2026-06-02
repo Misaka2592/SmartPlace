@@ -644,18 +644,18 @@ button, .gradio-button {
   padding-bottom: 8px !important;
 }
 #sp-left-panel {
-  flex: 0 1 clamp(360px, 22vw, 440px) !important;
-  min-width: 360px !important;
-  max-width: 460px !important;
+  flex: 0 1 clamp(400px, 22vw, 480px) !important;
+  min-width: 400px !important;
+  max-width: 480px !important;
 }
 #sp-center-panel {
   flex: 1 1 auto !important;
-  min-width: 520px !important;
+  min-width: 620px !important;
 }
 #sp-right-panel {
-  flex: 0 1 clamp(460px, 28vw, 560px) !important;
-  min-width: 460px !important;
-  max-width: 560px !important;
+  flex: 0 1 clamp(360px, 18vw, 420px) !important;
+  min-width: 360px !important;
+  max-width: 420px !important;
 }
 #sp-left-panel .sp-card {
   min-height: calc(100vh - 150px) !important;
@@ -683,6 +683,19 @@ button, .gradio-button {
 }
 #sp-right-panel input {
   min-height: 42px !important;
+}
+#sp-right-panel input[type="number"] {
+  display: none !important;
+}
+#sp-right-panel input[type="checkbox"] {
+  display: inline-block !important;
+  width: 22px !important;
+  height: 22px !important;
+  min-height: 22px !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  position: relative !important;
+  z-index: 5 !important;
 }
 #sp-right-panel label,
 #sp-right-panel .wrap {
@@ -1674,10 +1687,10 @@ with gr.Blocks(
         """
     )
 
-    with gr.Tabs(selected="workspace") as main_tabs:
+    with gr.Tabs(selected="workspace"):
         with gr.Tab("01 · 创作工作台", id="workspace"):
             with gr.Row(equal_height=False, elem_id="workspace-main-row"):
-                with gr.Column(scale=3, min_width=360, elem_id="sp-left-panel"):
+                with gr.Column(scale=3, min_width=400, elem_id="sp-left-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>前景图片区域</div><div class='sp-subtitle'>预制前景图片 / 本地上传</div>")
                         foreground_input = gr.Image(label="前景物体 Foreground", type="numpy", height=240)
@@ -1708,7 +1721,7 @@ with gr.Blocks(
                     manual_label_input = gr.State("未填写")
                     manual_reason_input = gr.State("")
 
-                with gr.Column(scale=6, min_width=520, elem_id="sp-center-panel"):
+                with gr.Column(scale=6, min_width=620, elem_id="sp-center-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>交互画布</div><div class='sp-subtitle'>在画布中拖动物体，记录多个候选位置后再统一评分。</div>")
                         drag_canvas_html = gr.HTML(label="拖拽画布", elem_id="canvas-shell")
@@ -1727,16 +1740,18 @@ with gr.Blocks(
                             gr.HTML("<div class='sp-section-title'>处理后前景</div><div class='sp-subtitle'>去底后的前景物体会显示在这里。</div>")
                             processed_foreground_output = gr.Image(label="Foreground", type="pil", height=190)
 
-                    with gr.Accordion("已记录候选", open=False):
+                    with gr.Group(elem_classes=["sp-card-tight"]):
+                        gr.HTML("<div class='sp-section-title'>已记录候选</div>")
                         candidate_points_table = gr.Dataframe(label="候选位置表", wrap=True)
 
-                    with gr.Accordion("调试坐标，可用于证明拖拽交互确实写入候选", open=False):
+                    with gr.Group(elem_classes=["sp-card-tight"]):
+                        gr.HTML("<div class='sp-section-title'>调试坐标</div>")
                         with gr.Row():
                             drag_x_input = gr.Textbox(label="当前 x", value="0", elem_id="drag_x_input")
                             drag_y_input = gr.Textbox(label="当前 y", value="0", elem_id="drag_y_input")
                             drag_scale_input = gr.Textbox(label="当前 scale", value="0.25", elem_id="drag_scale_input")
 
-                with gr.Column(scale=3, min_width=460, elem_id="sp-right-panel"):
+                with gr.Column(scale=3, min_width=360, elem_id="sp-right-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>模型与参数</div><div class='sp-subtitle'>参数越少越适合演示，更多选项已收纳。</div>")
                         mask_mode_input = gr.State(cfg.get("mask_processor", {}).get("default_mode", "自动判断"))
@@ -1746,23 +1761,24 @@ with gr.Blocks(
                             value=cfg.get("mask_processor", {}).get("white_bg_threshold", 38),
                             step=2,
                             label="去底阈值",
+                            buttons=[],
                         )
-                        scale_input = gr.Slider(minimum=0.05, maximum=0.8, value=0.25, step=0.05, label="前景缩放比例")
-                        top_k_input = gr.Slider(minimum=1, maximum=5, value=3, step=1, label="Top-K 数量")
-                        filter_out_of_bounds_input = gr.Checkbox(value=True, label="过滤明显越界候选")
-                        enable_explanation_input = gr.Checkbox(value=False, label="生成模型解释图（较慢）")
-                        enable_libcom_suite_input = gr.Checkbox(value=False, label="启用 LibCom 增强模型（较慢）")
+                        scale_input = gr.Slider(minimum=0.05, maximum=0.8, value=0.25, step=0.05, label="前景缩放比例", buttons=[])
+                        top_k_input = gr.Slider(minimum=1, maximum=5, value=3, step=1, label="Top-K 数量", buttons=[])
+                        filter_out_of_bounds_input = gr.Checkbox(value=True, label="过滤明显越界候选", interactive=True)
+                        enable_explanation_input = gr.Checkbox(value=False, label="生成模型解释图（较慢）", interactive=True)
+                        enable_libcom_suite_input = gr.Checkbox(value=False, label="启用 LibCom 增强模型（较慢）", interactive=True)
                         libcom_suite_models_input = gr.CheckboxGroup(
                             choices=["fopa", "fos", "harmony", "pctnet", "lbm"],
                             value=["fos", "harmony", "pctnet"],
                             label="增强模型选择",
                         )
                         with gr.Accordion("LibCom 增强模型参数", open=True):
-                            lbm_steps_input = gr.Slider(minimum=1, maximum=8, value=4, step=1, label="LBM steps")
-                            lbm_resolution_input = gr.Slider(minimum=512, maximum=1024, value=768, step=128, label="LBM resolution")
+                            lbm_steps_input = gr.Slider(minimum=1, maximum=8, value=4, step=1, label="LBM steps", buttons=[])
+                            lbm_resolution_input = gr.Slider(minimum=512, maximum=1024, value=768, step=128, label="LBM resolution", buttons=[])
                         with gr.Accordion("高级解释图参数", open=True):
-                            occlusion_patch_size_input = gr.Slider(minimum=48, maximum=160, value=96, step=16, label="遮挡块大小")
-                            occlusion_stride_input = gr.Slider(minimum=32, maximum=128, value=96, step=16, label="遮挡滑动步长")
+                            occlusion_patch_size_input = gr.Slider(minimum=48, maximum=160, value=96, step=16, label="遮挡块大小", buttons=[])
+                            occlusion_stride_input = gr.Slider(minimum=32, maximum=128, value=96, step=16, label="遮挡滑动步长", buttons=[])
 
         with gr.Tab("02 · 结果仪表盘", id="results"):
             with gr.Row(equal_height=False):
@@ -1840,7 +1856,7 @@ with gr.Blocks(
         outputs=[candidate_points_state, candidate_points_table],
     )
 
-    score_event = score_button.click(
+    score_button.click(
         fn=score_drag_candidates,
         inputs=[
             bg_state,
@@ -1881,11 +1897,6 @@ with gr.Blocks(
             case_summary_csv_file,
             case_summary_md_file,
         ],
-    )
-    score_event.then(
-        fn=lambda: gr.update(selected="results"),
-        inputs=[],
-        outputs=[main_tabs],
     )
 
 
