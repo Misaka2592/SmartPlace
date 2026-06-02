@@ -579,6 +579,78 @@ input, textarea { background: #ffffff !important; border-color: var(--sp-border)
   #sp-topbar { margin-left: -18px !important; padding-left: 24px; }
   .sp-metric-row { margin-left: 0 !important; }
 }
+
+#sp-topbar,
+.sp-metric-row {
+  display: none !important;
+}
+#sp-app-frame {
+  max-width: 1920px !important;
+  padding: 8px 14px 18px !important;
+}
+.sp-brand { display: none !important; }
+.tab-nav {
+  margin-top: 0 !important;
+}
+.sp-card { padding: 12px !important; }
+.sp-card-tight { padding: 12px !important; }
+.sp-section-title {
+  font-size: 15px !important;
+  margin-bottom: 4px !important;
+}
+.sp-subtitle {
+  display: none !important;
+  margin-bottom: 8px !important;
+  font-size: 12px !important;
+  line-height: 1.45 !important;
+}
+button, .gradio-button {
+  min-height: 34px !important;
+  font-size: 13px !important;
+}
+.tab-nav button {
+  min-height: 38px !important;
+  padding: 8px 14px !important;
+  font-size: 14px !important;
+}
+.sp-preview-card {
+  min-height: 250px !important;
+}
+.sp-preview-card .image-container,
+.sp-preview-card [data-testid="image"],
+.sp-preview-card img {
+  min-height: 145px !important;
+}
+#canvas-shell iframe {
+  min-height: 430px !important;
+  max-height: 520px !important;
+}
+#workspace-main-row {
+  flex-wrap: nowrap !important;
+  gap: 12px !important;
+}
+#sp-left-panel {
+  flex: 0 0 300px !important;
+  min-width: 280px !important;
+  max-width: 320px !important;
+}
+#sp-center-panel {
+  flex: 1 1 auto !important;
+  min-width: 460px !important;
+}
+#sp-right-panel {
+  flex: 0 0 310px !important;
+  min-width: 290px !important;
+  max-width: 330px !important;
+}
+#sp-left-panel .sp-card {
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+}
+#sp-right-panel .sp-card {
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+}
 """
 
 
@@ -1539,74 +1611,39 @@ with gr.Blocks(
 
     with gr.Tabs():
         with gr.Tab("01 · 创作工作台", id="workspace"):
-            with gr.Row(equal_height=False):
-                with gr.Column(scale=4, min_width=410):
+            with gr.Row(equal_height=False, elem_id="workspace-main-row"):
+                with gr.Column(scale=3, min_width=280, elem_id="sp-left-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
-                        gr.HTML("""
-<div class="sp-section-title">操作流程</div>
-<div class="sp-subtitle">按照从上到下的顺序操作，适合课堂现场边演示边讲解。</div>
-<div class="sp-mini-guide">
-  <div class="sp-guide-step"><div class="sp-guide-num">1</div><div><b>上传素材</b><span>背景图 + 前景物体</span></div></div>
-  <div class="sp-guide-step"><div class="sp-guide-num">2</div><div><b>加载画布</b><span>自动处理前景 mask</span></div></div>
-  <div class="sp-guide-step"><div class="sp-guide-num">3</div><div><b>拖拽记录</b><span>保存多个候选位置</span></div></div>
-  <div class="sp-guide-step"><div class="sp-guide-num">4</div><div><b>批量评分</b><span>输出 Top-K 与实验文件</span></div></div>
-</div>
-                        """)
-
-                        gr.HTML("""
-<div class="sp-section-title">AI工具</div>
-<div class="sp-subtitle">基础合成、图像和谐化、热力图与评分分析会在右侧工作区展示。</div>
-<div class="sp-mini-guide">
-  <div class="sp-guide-step"><div class="sp-guide-num">A</div><div><b>基础合成</b><span>将前景图像合成到背景图像上</span></div></div>
-  <div class="sp-guide-step"><div class="sp-guide-num">H</div><div><b>图像和谐化</b><span>PCTNet / LBM 调整前景光照和色彩</span></div></div>
-  <div class="sp-guide-step"><div class="sp-guide-num">F</div><div><b>前景放置热力图</b><span>FOPA 预测位置与尺度合理性</span></div></div>
-  <div class="sp-guide-step"><div class="sp-guide-num">S</div><div><b>评分分析</b><span>OPA / FOS / HarmonyScore 多角度评分</span></div></div>
-</div>
-                        """)
-
-                        gr.HTML("<div class='sp-section-title'>素材输入</div><div class='sp-subtitle'>建议使用清晰背景图和边界明确的前景图，展示效果会更稳定。</div>")
                         gr.HTML("<div class='sp-section-title'>前景图片区域</div><div class='sp-subtitle'>预制前景图片 / 本地上传</div>")
-                        foreground_input = gr.Image(label="前景物体 Foreground", type="numpy", height=260)
+                        foreground_input = gr.Image(label="前景物体 Foreground", type="numpy", height=120)
                         gr.Examples(
                             examples=[
                                 os.path.join("assets", "foregrounds", "cup.png"),
                                 os.path.join("assets", "foregrounds", "chair.png"),
                                 os.path.join("assets", "foregrounds", "car.png"),
-                                os.path.join("assets", "foregrounds", "bag.png"),
-                                os.path.join("assets", "foregrounds", "dog.png"),
                             ],
                             inputs=foreground_input,
                             label="预制前景图片",
                         )
                         gr.HTML("<div class='sp-section-title'>背景图片区域</div><div class='sp-subtitle'>预制背景图片 / 本地上传</div>")
-                        background_input = gr.Image(label="背景图 Background", type="numpy", height=260)
+                        background_input = gr.Image(label="背景图 Background", type="numpy", height=120)
                         gr.Examples(
                             examples=[
                                 os.path.join("assets", "backgrounds", "desk.png"),
                                 os.path.join("assets", "backgrounds", "classroom.png"),
                                 os.path.join("assets", "backgrounds", "street.png"),
-                                os.path.join("assets", "backgrounds", "hall.png"),
-                                os.path.join("assets", "backgrounds", "grass.png"),
                             ],
                             inputs=background_input,
                             label="预制背景图片",
                         )
 
-                    with gr.Group(elem_classes=["sp-card"]):
-                        gr.HTML("<div class='sp-section-title'>案例记录</div><div class='sp-subtitle'>用于生成项目报告和案例汇总，可以先保持默认。</div>")
-                        case_name_input = gr.Textbox(label="案例名称", value="拖拽案例：桌面背景 + 杯子前景")
-                        with gr.Row():
-                            background_note_input = gr.Textbox(label="背景说明", value="")
-                            foreground_note_input = gr.Textbox(label="前景说明", value="")
-                        with gr.Row():
-                            manual_label_input = gr.Radio(
-                                choices=["推荐", "可接受", "不推荐", "未填写"],
-                                value="未填写",
-                                label="人工判断 Top-1",
-                            )
-                        manual_reason_input = gr.Textbox(label="人工判断理由", lines=3, placeholder="例如：物体位于桌面区域，尺度和接触关系较自然。")
+                    case_name_input = gr.State("SmartPlace 工作台案例")
+                    background_note_input = gr.State("")
+                    foreground_note_input = gr.State("")
+                    manual_label_input = gr.State("未填写")
+                    manual_reason_input = gr.State("")
 
-                with gr.Column(scale=7, min_width=720):
+                with gr.Column(scale=6, min_width=460, elem_id="sp-center-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>交互画布</div><div class='sp-subtitle'>在画布中拖动物体，记录多个候选位置后再统一评分。</div>")
                         drag_canvas_html = gr.HTML(label="拖拽画布", elem_id="canvas-shell")
@@ -1619,13 +1656,12 @@ with gr.Blocks(
                     with gr.Row(equal_height=False):
                         with gr.Column(scale=1, elem_classes=["sp-card-tight", "sp-preview-card"]):
                             gr.HTML("<div class='sp-section-title'>Mask 预览</div><div class='sp-subtitle'>加载画布后自动显示前景分割结果。</div>")
-                            mask_preview_output = gr.Image(label="Mask", type="pil", height=300)
+                            mask_preview_output = gr.Image(label="Mask", type="pil", height=190)
                         with gr.Column(scale=1, elem_classes=["sp-card-tight", "sp-preview-card"]):
                             gr.HTML("<div class='sp-section-title'>处理后前景</div><div class='sp-subtitle'>去底后的前景物体会显示在这里。</div>")
-                            processed_foreground_output = gr.Image(label="Foreground", type="pil", height=300)
+                            processed_foreground_output = gr.Image(label="Foreground", type="pil", height=190)
 
-                    with gr.Group(elem_classes=["sp-card-tight"]):
-                        gr.HTML("<div class='sp-section-title'>已记录候选</div><div class='sp-subtitle'>每一行就是一次拖拽记录，记录后再点击批量评分。</div>")
+                    with gr.Accordion("已记录候选", open=False):
                         candidate_points_table = gr.Dataframe(label="候选位置表", wrap=True)
 
                     with gr.Accordion("调试坐标，可用于证明拖拽交互确实写入候选", open=False):
@@ -1634,7 +1670,7 @@ with gr.Blocks(
                             drag_y_input = gr.Textbox(label="当前 y", value="0", elem_id="drag_y_input")
                             drag_scale_input = gr.Textbox(label="当前 scale", value="0.25", elem_id="drag_scale_input")
 
-                with gr.Column(scale=3, min_width=360):
+                with gr.Column(scale=3, min_width=290, elem_id="sp-right-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>模型与参数</div><div class='sp-subtitle'>参数越少越适合演示，更多选项已收纳。</div>")
                         mask_mode_input = gr.Radio(
@@ -1665,10 +1701,6 @@ with gr.Blocks(
                         with gr.Accordion("高级解释图参数", open=False):
                             occlusion_patch_size_input = gr.Slider(minimum=48, maximum=160, value=96, step=16, label="遮挡块大小")
                             occlusion_stride_input = gr.Slider(minimum=32, maximum=128, value=96, step=16, label="遮挡滑动步长")
-
-                    with gr.Group(elem_classes=["sp-card"]):
-                        gr.HTML("<div class='sp-section-title'>后端状态</div><div class='sp-subtitle'>答辩时可打开展示模型调用真实性。</div>")
-                        model_info = gr.Textbox(label="libcom OPA 后端", value=build_model_info_text(), lines=9, interactive=False)
 
         with gr.Tab("02 · 结果仪表盘", id="results"):
             with gr.Row(equal_height=False):
