@@ -13,12 +13,18 @@ import yaml
 from PIL import Image
 
 from models.libcom_opa_subprocess_scorer import LibcomOPASubprocessScorer
+from models.smartplace_opa_calibrated_scorer import SmartPlaceOPACalibratedScorer
 from models.libcom_multimodel_subprocess import LibcomMultiModelSubprocess
 from utils.composer import compose_image_with_mask, resize_foreground
 from utils.scoring import format_score, analyze_candidate, summarize_run
 from utils.logger import InferenceLogger
 from utils.exporter import export_markdown_report, export_result_package_metadata
-from utils.explain import generate_occlusion_heatmap, export_explanation_markdown
+from utils.explain import (
+    generate_occlusion_heatmap,
+    generate_gradient_saliency_map,
+    generate_calibration_feature_plot,
+    export_explanation_markdown,
+)
 from utils.mask_processor import process_foreground_for_composition, save_processed_foreground
 from utils.case_manager import (
     build_case_record,
@@ -28,6 +34,18 @@ from utils.case_manager import (
     export_case_summary_csv,
     export_case_summary_markdown,
 )
+
+
+def collect_preset_images(folder: str, limit: int = 6) -> List[str]:
+    exts = (".png", ".jpg", ".jpeg", ".webp")
+    if not os.path.isdir(folder):
+        return []
+    files = [
+        os.path.join(folder, name)
+        for name in sorted(os.listdir(folder))
+        if name.lower().endswith(exts)
+    ]
+    return files[:limit]
 
 
 CUSTOM_DRAG_JS = """
@@ -688,14 +706,11 @@ button, .gradio-button {
   display: none !important;
 }
 #sp-right-panel input[type="checkbox"] {
-  display: inline-block !important;
-  width: 22px !important;
-  height: 22px !important;
-  min-height: 22px !important;
+  appearance: auto !important;
+  -webkit-appearance: checkbox !important;
+  accent-color: #2563eb !important;
   opacity: 1 !important;
   pointer-events: auto !important;
-  position: relative !important;
-  z-index: 5 !important;
 }
 #sp-right-panel label,
 #sp-right-panel .wrap {
@@ -757,13 +772,24 @@ logger = InferenceLogger(log_dir=LOG_DIR, enable_file_log=cfg.get("output", {}).
 
 scorer_cfg = cfg.get("scorer", {})
 libcom_cfg = scorer_cfg.get("libcom_opa_subprocess", {})
-scorer = LibcomOPASubprocessScorer(
+base_opa_scorer = LibcomOPASubprocessScorer(
     python_path=libcom_cfg.get("python_path", ".venv_libcom/Scripts/python.exe"),
     script_path=libcom_cfg.get("script_path", "scripts/libcom_opa_infer_once.py"),
     batch_script_path=libcom_cfg.get("batch_script_path", "scripts/libcom_opa_infer_batch.py"),
     device=libcom_cfg.get("device", "cuda:0"),
     model_type=libcom_cfg.get("model_type", "SimOPA"),
     temp_dir=libcom_cfg.get("temp_dir", "outputs/libcom_subprocess"),
+    timeout_seconds=libcom_cfg.get("timeout_seconds", 120),
+    logger=logger,
+)
+calibration_cfg = scorer_cfg.get("smartplace_opa_calibrated", {})
+scorer = SmartPlaceOPACalibratedScorer(
+    base_scorer=base_opa_scorer,
+    opa_weight=calibration_cfg.get("opa_weight", 0.72),
+    geometry_weight=calibration_cfg.get("geometry_weight", 0.14),
+    contact_weight=calibration_cfg.get("contact_weight", 0.08),
+    support_weight=calibration_cfg.get("support_weight", 0.06),
+    out_of_bounds_cap=calibration_cfg.get("out_of_bounds_cap", 0.20),
     logger=logger,
 )
 
@@ -1338,6 +1364,12 @@ def clear_candidates():
     return [], pd.DataFrame(columns=["候选编号", "x", "y", "scale"])
 
 
+def as_enabled(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"开启", "on", "true", "1", "yes"}
+
+
 def score_drag_candidates(
     bg_state,
     fg_state,
@@ -1346,6 +1378,8 @@ def score_drag_candidates(
     top_k,
     filter_out_of_bounds,
     enable_explanation,
+    enable_saliency,
+    enable_feature_analysis,
     occlusion_patch_size,
     occlusion_stride,
     enable_libcom_suite,
@@ -1370,6 +1404,11 @@ def score_drag_candidates(
     foreground = fg_state.convert("RGBA")
     mask_info = dict(mask_info_state or {})
     top_k = int(top_k)
+    filter_out_of_bounds = as_enabled(filter_out_of_bounds)
+    enable_explanation = as_enabled(enable_explanation)
+    enable_saliency = as_enabled(enable_saliency)
+    enable_feature_analysis = as_enabled(enable_feature_analysis)
+    enable_libcom_suite = as_enabled(enable_libcom_suite)
     run_id = time.strftime("%Y%m%d_%H%M%S")
 
     logger.section("[SmartPlace-Drag] Start drag candidate scoring")
@@ -1379,6 +1418,10 @@ def score_drag_candidates(
     logger.log(f"[Param] top_k={top_k}")
     logger.log(f"[Param] filter_out_of_bounds={filter_out_of_bounds}")
     logger.log(f"[Param] enable_explanation={enable_explanation}")
+    logger.log(f"[Param] enable_saliency={enable_saliency}")
+    logger.log(f"[Param] enable_feature_analysis={enable_feature_analysis}")
+    logger.log(f"[Param] enable_libcom_suite={enable_libcom_suite}")
+    logger.log(f"[Param] libcom_suite_models={list(libcom_suite_models or [])}")
 
     composites = []
     candidate_infos = []
@@ -1436,33 +1479,53 @@ def score_drag_candidates(
 
     summary = summarize_run(results, top_k=top_k)
 
-    explanation_gallery = []
     explanation_text = ""
     explanation_overlay_path = None
+    explanation_saliency_path = None
+    explanation_feature_plot_path = None
     explanation_report_path = None
-    libcom_suite_text = "未运行 LibCom 增强模型。"
+    occlusion_explanation_update = gr.update(visible=False)
+    saliency_explanation_update = gr.update(visible=False)
+    feature_explanation_update = gr.update(visible=False)
+    libcom_suite_text = ""
     libcom_suite_gallery = []
-
-    if enable_explanation and ranked:
+    if (enable_explanation or enable_saliency or enable_feature_analysis) and ranked:
         top1 = ranked[0]
         logger.section("[SmartPlace-Drag] Start explanation for Top-1 candidate")
-        explanation_result = generate_occlusion_heatmap(
-            scorer=scorer,
-            image=top1["image"],
-            candidate_info=top1["candidate_info"],
-            patch_size=int(occlusion_patch_size),
-            stride=int(occlusion_stride),
-            output_dir=EXPLAIN_DIR,
-            prefix=f"drag_candidate_{top1['id']}",
-        )
-        explanation_overlay_path = explanation_result["overlay_path"]
-        explanation_report_path = export_explanation_markdown(
-            explanation_result=explanation_result,
-            candidate_id=top1["id"],
-            output_dir=REPORT_RESULT_DIR,
-        )
-        explanation_text = explanation_result["explanation"]
-        explanation_gallery.append((explanation_overlay_path, f"候选 {top1['id']} 遮挡实验热力图"))
+        if enable_explanation:
+            explanation_result = generate_occlusion_heatmap(
+                scorer=scorer,
+                image=top1["image"],
+                candidate_info=top1["candidate_info"],
+                patch_size=int(occlusion_patch_size),
+                stride=int(occlusion_stride),
+                output_dir=EXPLAIN_DIR,
+                prefix=f"drag_candidate_{top1['id']}",
+            )
+            explanation_overlay_path = explanation_result["overlay_path"]
+            explanation_report_path = export_explanation_markdown(
+                explanation_result=explanation_result,
+                candidate_id=top1["id"],
+                output_dir=REPORT_RESULT_DIR,
+            )
+            explanation_text = explanation_result["explanation"]
+            occlusion_explanation_update = gr.update(value=explanation_overlay_path, visible=True)
+        if enable_saliency:
+            saliency_result = generate_gradient_saliency_map(
+                image=top1["image"],
+                output_dir=EXPLAIN_DIR,
+                prefix=f"drag_candidate_{top1['id']}",
+            )
+            explanation_saliency_path = saliency_result["overlay_path"]
+            saliency_explanation_update = gr.update(value=explanation_saliency_path, visible=True)
+        if enable_feature_analysis:
+            feature_result = generate_calibration_feature_plot(
+                candidate_info=top1["candidate_info"],
+                output_dir=EXPLAIN_DIR,
+                prefix=f"drag_candidate_{top1['id']}",
+            )
+            explanation_feature_plot_path = feature_result["feature_plot_path"]
+            feature_explanation_update = gr.update(value=explanation_feature_plot_path, visible=True)
 
     if enable_libcom_suite and ranked:
         top1 = ranked[0]
@@ -1594,7 +1657,9 @@ def score_drag_candidates(
         topk_gallery,
         df,
         run_analysis_text,
-        explanation_gallery,
+        occlusion_explanation_update,
+        saliency_explanation_update,
+        feature_explanation_update,
         libcom_suite_text,
         libcom_suite_gallery,
         case_summary_df,
@@ -1622,6 +1687,8 @@ with gr.Blocks(
     title="SmartPlace Studio · 智能物体放置展示平台",
     fill_width=True,
 ) as demo:
+    preset_foregrounds = collect_preset_images(os.path.join("assets", "foregrounds"), limit=6)
+    preset_backgrounds = collect_preset_images(os.path.join("assets", "backgrounds"), limit=6)
     bg_state = gr.State(value=None)
     fg_state = gr.State(value=None)
     mask_info_state = gr.State(value={})
@@ -1695,22 +1762,14 @@ with gr.Blocks(
                         gr.HTML("<div class='sp-section-title'>前景图片区域</div><div class='sp-subtitle'>预制前景图片 / 本地上传</div>")
                         foreground_input = gr.Image(label="前景物体 Foreground", type="numpy", height=240)
                         gr.Examples(
-                            examples=[
-                                os.path.join("assets", "foregrounds", "cup.png"),
-                                os.path.join("assets", "foregrounds", "chair.png"),
-                                os.path.join("assets", "foregrounds", "car.png"),
-                            ],
+                            examples=preset_foregrounds,
                             inputs=foreground_input,
                             label="预制前景图片",
                         )
                         gr.HTML("<div class='sp-section-title'>背景图片区域</div><div class='sp-subtitle'>预制背景图片 / 本地上传</div>")
                         background_input = gr.Image(label="背景图 Background", type="numpy", height=240)
                         gr.Examples(
-                            examples=[
-                                os.path.join("assets", "backgrounds", "desk.png"),
-                                os.path.join("assets", "backgrounds", "classroom.png"),
-                                os.path.join("assets", "backgrounds", "street.png"),
-                            ],
+                            examples=preset_backgrounds,
                             inputs=background_input,
                             label="预制背景图片",
                         )
@@ -1765,17 +1824,20 @@ with gr.Blocks(
                         )
                         scale_input = gr.Slider(minimum=0.05, maximum=0.8, value=0.25, step=0.05, label="前景缩放比例", buttons=[])
                         top_k_input = gr.Slider(minimum=1, maximum=5, value=3, step=1, label="Top-K 数量", buttons=[])
-                        filter_out_of_bounds_input = gr.Checkbox(value=True, label="过滤明显越界候选", interactive=True)
-                        enable_explanation_input = gr.Checkbox(value=False, label="生成模型解释图（较慢）", interactive=True)
-                        enable_libcom_suite_input = gr.Checkbox(value=False, label="启用 LibCom 增强模型（较慢）", interactive=True)
-                        libcom_suite_models_input = gr.CheckboxGroup(
+                        filter_out_of_bounds_input = gr.Radio(choices=["ON", "OFF"], value="ON", label="过滤越界候选", interactive=True)
+                        enable_explanation_input = gr.Radio(choices=["OFF", "ON"], value="OFF", label="生成遮挡实验热力图（慢）", interactive=True)
+                        enable_saliency_input = gr.Radio(choices=["OFF", "ON"], value="OFF", label="生成梯度显著性图", interactive=True)
+                        enable_feature_analysis_input = gr.Radio(choices=["OFF", "ON"], value="OFF", label="生成中间特征分析", interactive=True)
+                        enable_libcom_suite_input = gr.Radio(choices=["OFF", "ON"], value="OFF", label="启用 LibCom 增强模型（慢）", interactive=True)
+                        libcom_suite_models_input = gr.Dropdown(
                             choices=["fopa", "fos", "harmony", "pctnet", "lbm"],
-                            value=["fos", "harmony", "pctnet"],
+                            value=["fopa", "fos", "harmony"],
+                            multiselect=True,
                             label="增强模型选择",
                         )
-                        with gr.Accordion("LibCom 增强模型参数", open=True):
-                            lbm_steps_input = gr.Slider(minimum=1, maximum=8, value=4, step=1, label="LBM steps", buttons=[])
-                            lbm_resolution_input = gr.Slider(minimum=512, maximum=1024, value=768, step=128, label="LBM resolution", buttons=[])
+                        with gr.Accordion("LibCom 高级参数", open=True):
+                            lbm_steps_input = gr.Slider(minimum=1, maximum=8, value=4, step=1, label="LBM 步数", buttons=[])
+                            lbm_resolution_input = gr.Slider(minimum=512, maximum=1024, value=768, step=128, label="LBM 分辨率", buttons=[])
                         with gr.Accordion("高级解释图参数", open=True):
                             occlusion_patch_size_input = gr.Slider(minimum=48, maximum=160, value=96, step=16, label="遮挡块大小", buttons=[])
                             occlusion_stride_input = gr.Slider(minimum=32, maximum=128, value=96, step=16, label="遮挡滑动步长", buttons=[])
@@ -1794,19 +1856,21 @@ with gr.Blocks(
                     gr.HTML("<div class='sp-section-title'>候选评分表</div><div class='sp-subtitle'>包含排名、OPA 分数、面积占比、越界状态和推荐理由。</div>")
                     score_table = gr.Dataframe(label="候选评分表", wrap=True)
                 with gr.Column(scale=5, elem_classes=["sp-card"]):
-                    gr.HTML("<div class='sp-section-title'>自动分析说明</div><div class='sp-subtitle'>可直接作为汇报讲解素材。</div>")
                     run_analysis_text = gr.Textbox(label="分析说明", lines=14, max_lines=14, elem_id="run-analysis-text")
 
         with gr.Tab("03 · 解释与案例库", id="analysis"):
             with gr.Row(equal_height=False):
                 with gr.Column(scale=1, elem_classes=["sp-card"]):
-                    gr.HTML("<div class='sp-section-title'>模型解释图</div><div class='sp-subtitle'>开启解释后，对 Top-1 候选做遮挡实验，显示影响区域。</div>")
-                    explanation_gallery = gr.Gallery(label="遮挡实验热力图", columns=1, height="auto")
+                    gr.HTML("<div class='sp-section-title'>模型解释图</div><div class='sp-subtitle'>开启后会基于 Top-1 候选生成遮挡实验热力图、梯度显著性图和中间特征分析图。</div>")
+                    with gr.Row(equal_height=False):
+                        occlusion_explanation_image = gr.Image(label="遮挡实验热力图", type="filepath", height=260, visible=False)
+                        saliency_explanation_image = gr.Image(label="梯度显著性图", type="filepath", height=260, visible=False)
+                    feature_explanation_image = gr.Image(label="中间特征分析图", type="filepath", height=300, visible=False)
                     gr.HTML("<div class='sp-section-title'>LibCom 增强模型</div><div class='sp-subtitle'>可选运行 FOPA、FOS、HarmonyScore、PCTNet、LBM，对 Top-1 候选做进一步评估与协调。</div>")
                     libcom_suite_gallery = gr.Gallery(label="FOPA 热力图 / 协调结果", columns=1, height="auto")
                     libcom_suite_text = gr.Textbox(label="多模型结果摘要", lines=12)
                 with gr.Column(scale=1, elem_classes=["sp-card"]):
-                    gr.HTML("<div class='sp-section-title'>测试案例汇总</div><div class='sp-subtitle'>所有评分案例会自动沉淀，方便报告展示。</div>")
+                    gr.HTML("<div class='sp-section-title'>案例汇总</div><div class='sp-subtitle'>所有评分案例会自动沉淀，方便报告展示。</div>")
                     case_summary_table = gr.Dataframe(label="所有已记录案例汇总", wrap=True)
 
         with gr.Tab("04 · 导出与复现", id="exports"):
@@ -1866,6 +1930,8 @@ with gr.Blocks(
             top_k_input,
             filter_out_of_bounds_input,
             enable_explanation_input,
+            enable_saliency_input,
+            enable_feature_analysis_input,
             occlusion_patch_size_input,
             occlusion_stride_input,
             enable_libcom_suite_input,
@@ -1884,7 +1950,9 @@ with gr.Blocks(
             topk_gallery,
             score_table,
             run_analysis_text,
-            explanation_gallery,
+            occlusion_explanation_image,
+            saliency_explanation_image,
+            feature_explanation_image,
             libcom_suite_text,
             libcom_suite_gallery,
             case_summary_table,

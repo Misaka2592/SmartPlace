@@ -24,6 +24,7 @@ class LibcomOPASubprocessScorer(BaseScorer):
         device: str = "cuda:0",
         model_type: str = "SimOPA",
         temp_dir: str = "outputs/libcom_subprocess",
+        timeout_seconds: int = 120,
         logger: InferenceLogger = None,
     ):
         self.python_path = python_path
@@ -32,6 +33,7 @@ class LibcomOPASubprocessScorer(BaseScorer):
         self.device = device
         self.model_type = model_type
         self.temp_dir = temp_dir
+        self.timeout_seconds = int(timeout_seconds)
         self.logger = logger or InferenceLogger()
         self.model_name = "libcom.OPAScoreModel.SimOPA.subprocess"
         self.is_loaded = True
@@ -44,6 +46,7 @@ class LibcomOPASubprocessScorer(BaseScorer):
         self.logger.log(f"[Model] batch_script_path={self.batch_script_path}")
         self.logger.log(f"[Model] device={self.device}")
         self.logger.log(f"[Model] model_type={self.model_type}")
+        self.logger.log(f"[Model] timeout_seconds={self.timeout_seconds}")
 
     def _extract_json_from_stdout(self, stdout: str) -> Dict:
         lines = [line.strip() for line in stdout.splitlines() if line.strip()]
@@ -78,7 +81,19 @@ class LibcomOPASubprocessScorer(BaseScorer):
             "--model_type", self.model_type,
         ]
         start = time.time()
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.logger.log(f"[LibcomOPA-Subprocess] timeout after {self.timeout_seconds}s")
+            raise RuntimeError(f"LibCom OPA single inference timed out after {self.timeout_seconds}s") from exc
         elapsed = time.time() - start
         if proc.returncode != 0:
             self.logger.log("[LibcomOPA-Subprocess] failed")
@@ -110,7 +125,19 @@ class LibcomOPASubprocessScorer(BaseScorer):
             "--masks", *mask_paths,
         ]
         start = time.time()
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.logger.log(f"[LibcomOPA-Subprocess-Batch] timeout after {self.timeout_seconds}s")
+            raise RuntimeError(f"LibCom OPA batch inference timed out after {self.timeout_seconds}s") from exc
         elapsed = time.time() - start
         if proc.returncode != 0:
             self.logger.log("[LibcomOPA-Subprocess-Batch] failed")
@@ -139,5 +166,6 @@ class LibcomOPASubprocessScorer(BaseScorer):
             "python_path": self.python_path,
             "script_path": self.script_path,
             "batch_script_path": self.batch_script_path,
+            "timeout_seconds": self.timeout_seconds,
             "is_loaded": self.is_loaded,
         }

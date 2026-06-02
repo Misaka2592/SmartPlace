@@ -11,6 +11,14 @@ scorer:
     device: cuda:0
     model_type: SimOPA
     temp_dir: outputs/libcom_subprocess
+    timeout_seconds: 120
+  smartplace_opa_calibrated:
+    name: SmartPlaceOPACalibratedScorer
+    opa_weight: 0.72
+    geometry_weight: 0.14
+    contact_weight: 0.08
+    support_weight: 0.06
+    out_of_bounds_cap: 0.20
   libcom_multimodel:
     name: LibcomMultiModelSubprocess
     python_path: .venv_libcom/Scripts/python.exe

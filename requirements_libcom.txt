@@ -1,0 +1,5 @@
+# Clone libcom first:
+# git clone https://github.com/bcmi/libcom.git third_party/libcom
+
+-r third_party/libcom/requirements.txt
+-e third_party/libcom

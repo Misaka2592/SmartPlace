@@ -87,6 +87,84 @@ def apply_heatmap_overlay(
     return Image.fromarray(overlay)
 
 
+def generate_gradient_saliency_map(
+    image: Image.Image,
+    output_dir: str = "outputs/explanations",
+    prefix: str = "saliency",
+) -> Dict:
+    """
+    Generate a lightweight image-gradient saliency map.
+
+    This is not Grad-CAM. It is a model-agnostic saliency baseline that marks
+    high-contrast regions likely to influence placement calibration, especially
+    object boundaries and contact areas.
+    """
+    ensure_dir(output_dir)
+    image = image.convert("RGB")
+    arr = np.asarray(image, dtype=np.float32) / 255.0
+    gray = arr.mean(axis=2)
+
+    gy, gx = np.gradient(gray)
+    saliency = np.sqrt(gx * gx + gy * gy)
+    saliency = normalize_heatmap(saliency)
+
+    overlay = apply_heatmap_overlay(image, saliency, alpha=0.40)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    saliency_path = os.path.join(output_dir, f"{prefix}_gradient_saliency_{timestamp}.png")
+    overlay_path = os.path.join(output_dir, f"{prefix}_gradient_overlay_{timestamp}.png")
+
+    Image.fromarray((saliency * 255).astype(np.uint8)).save(saliency_path)
+    overlay.save(overlay_path)
+
+    return {
+        "saliency_path": saliency_path,
+        "overlay_path": overlay_path,
+        "max_saliency": float(saliency.max()),
+        "mean_saliency": float(saliency.mean()),
+    }
+
+
+def generate_calibration_feature_plot(
+    candidate_info: Dict,
+    output_dir: str = "outputs/explanations",
+    prefix: str = "features",
+) -> Dict:
+    """
+    Export a bar chart for the intermediate features used by
+    SmartPlaceOPACalibratedScorer.
+    """
+    ensure_dir(output_dir)
+    features = dict(candidate_info.get("calibration_features") or {})
+    keep = ["geometry_score", "contact_score", "support_score"]
+    names = [name for name in keep if name in features]
+    values = [float(features[name]) for name in names]
+
+    if not names:
+        names = ["geometry_score", "contact_score", "support_score"]
+        values = [0.0, 0.0, 0.0]
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    plot_path = os.path.join(output_dir, f"{prefix}_calibration_features_{timestamp}.png")
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.2), dpi=140)
+    colors = ["#2563eb", "#14b8a6", "#f59e0b"][: len(values)]
+    ax.bar(names, values, color=colors)
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("score")
+    ax.set_title("SmartPlace calibration intermediate features")
+    ax.grid(axis="y", alpha=0.25)
+    for idx, value in enumerate(values):
+        ax.text(idx, min(1.02, value + 0.03), f"{value:.3f}", ha="center", va="bottom", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(plot_path)
+    plt.close(fig)
+
+    return {
+        "feature_plot_path": plot_path,
+        "features": {name: value for name, value in zip(names, values)},
+    }
+
+
 def generate_occlusion_heatmap(
     scorer,
     image: Image.Image,
@@ -111,7 +189,8 @@ def generate_occlusion_heatmap(
     image = image.convert("RGB")
     w, h = image.size
 
-    original_score = scorer.score(image, candidate_info)
+    score_fn = getattr(scorer, "explain_score", scorer.score)
+    original_score = score_fn(image, candidate_info)
 
     xs = list(range(0, max(1, w - patch_size + 1), stride))
     ys = list(range(0, max(1, h - patch_size + 1), stride))
@@ -134,7 +213,7 @@ def generate_occlusion_heatmap(
                 patch_size=patch_size,
             )
 
-            new_score = scorer.score(occluded, candidate_info)
+            new_score = score_fn(occluded, candidate_info)
             importance = original_score - new_score
 
             # 如果遮挡后分数上升，说明该区域可能是负贡献。
