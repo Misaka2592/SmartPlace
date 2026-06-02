@@ -184,28 +184,4 @@ git clone https://github.com/bcmi/libcom.git third_party/libcom
 检查 assets/foregrounds/ 和 assets/backgrounds/ 中是否真的有图片文件。
 ```
 
-## 11. 给组员的最小交付清单
 
-需要保证这些内容在仓库里：
-
-- `app.py`
-- `requirements.txt`
-- `requirements_libcom.txt`
-- `requirements_mindspore.txt`
-- `setup_main.bat`
-- `setup_libcom.bat`
-- `run_app.bat`
-- `configs/default.yaml`
-- `assets/foregrounds/`
-- `assets/backgrounds/`
-- `models/`
-- `utils/`
-- `scripts/`
-
-这些内容不要提交：
-
-- `.venv/`
-- `.venv_libcom/`
-- `.venv_ms/`
-- `__pycache__/`
-- 大量临时输出文件，如 `outputs/` 下的缓存结果
