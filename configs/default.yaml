@@ -1,13 +1,16 @@
 project:
   name: SmartPlace
-  version: v0.5
+  version: realmodel-v1-subprocess
 
 scorer:
-  name: DummyScorerV4
-  weight_path: weights/dummy_scorer_rule_based.pth
-  device: cpu
-  input_size: 224
-  batch_size: 8
+  libcom_opa_subprocess:
+    name: LibcomOPASubprocessScorer
+    python_path: .venv_libcom/Scripts/python.exe
+    script_path: scripts/libcom_opa_infer_once.py
+    batch_script_path: scripts/libcom_opa_infer_batch.py
+    device: cuda:0
+    model_type: SimOPA
+    temp_dir: outputs/libcom_subprocess
 
 mask_processor:
   default_mode: 自动判断

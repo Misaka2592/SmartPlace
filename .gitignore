@@ -1,0 +1,16 @@
+.venv/
+.venv_libcom/
+.venv_ms/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+outputs/
+report/cases/
+report/results/
+
+third_party/libcom/
+
+.DS_Store
+Thumbs.db

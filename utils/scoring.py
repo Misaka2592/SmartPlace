@@ -1,5 +1,20 @@
 from typing import Dict, List
 
+def assign_relative_labels(results):
+    sorted_results = sorted(results, key=lambda item: item["score"], reverse=True)
+
+    n = len(sorted_results)
+
+    for rank, item in enumerate(sorted_results):
+        if rank < max(1, n // 3):
+            item["label"] = "推荐"
+        elif rank < max(2, 2 * n // 3):
+            item["label"] = "可接受"
+        else:
+            item["label"] = "不推荐"
+
+    return sorted_results
+
 
 def score_to_label(score: float) -> str:
     """

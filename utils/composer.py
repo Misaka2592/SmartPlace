@@ -135,3 +135,76 @@ def compose_image(
     }
 
     return composite.convert("RGB"), info
+
+
+import numpy as np
+
+
+def compose_image_with_mask(
+    background: Image.Image,
+    foreground: Image.Image,
+    x: int,
+    y: int,
+    scale: float = 0.4,
+    allow_out_of_bounds: bool = False,
+):
+    """
+    与 compose_image 类似，但额外返回 composite_mask。
+    composite_mask 表示合成图中前景区域。
+    """
+    background = background.convert("RGB")
+    foreground = foreground.convert("RGBA")
+
+    bg_w, bg_h = background.size
+
+    resized_fg = resize_foreground(
+        foreground=foreground,
+        scale=scale,
+        bg_width=bg_w,
+        bg_height=bg_h,
+    )
+
+    fg_w, fg_h = resized_fg.size
+
+    out_of_bounds = check_out_of_bounds(
+        x=x,
+        y=y,
+        fg_width=fg_w,
+        fg_height=fg_h,
+        bg_width=bg_w,
+        bg_height=bg_h,
+    )
+
+    composite = background.convert("RGBA")
+    composite_mask = Image.new("L", (bg_w, bg_h), 0)
+
+    if out_of_bounds and not allow_out_of_bounds:
+        info = {
+            "x": x,
+            "y": y,
+            "fg_width": fg_w,
+            "fg_height": fg_h,
+            "bg_width": bg_w,
+            "bg_height": bg_h,
+            "out_of_bounds": True,
+            "composed": False,
+        }
+        return composite.convert("RGB"), composite_mask, info
+
+    composite.alpha_composite(resized_fg, dest=(x, y))
+
+    fg_alpha = resized_fg.getchannel("A")
+    composite_mask.paste(fg_alpha, (x, y))
+
+    info = {
+        "x": x,
+        "y": y,
+        "fg_width": fg_w,
+        "fg_height": fg_h,
+        "bg_width": bg_w,
+        "bg_height": bg_h,
+        "out_of_bounds": out_of_bounds,
+        "composed": True,
+    }
+
+    return composite.convert("RGB"), composite_mask, info
