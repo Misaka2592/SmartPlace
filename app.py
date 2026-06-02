@@ -658,13 +658,15 @@ button, .gradio-button {
   max-width: 500px !important;
 }
 #sp-left-panel .sp-card {
-  max-height: calc(100vh - 150px);
-  overflow-y: auto;
+  min-height: calc(100vh - 150px) !important;
+  max-height: none !important;
+  overflow-y: visible !important;
 }
 #sp-right-panel .sp-card {
-  max-height: calc(100vh - 150px);
-  overflow-y: auto;
-  overflow-x: hidden;
+  min-height: calc(100vh - 150px) !important;
+  max-height: none !important;
+  overflow-y: visible !important;
+  overflow-x: hidden !important;
 }
 #sp-right-panel .accordion,
 #sp-right-panel .form,
@@ -694,6 +696,12 @@ button, .gradio-button {
 #sp-right-panel .accordion button:focus {
   outline: none !important;
   box-shadow: none !important;
+}
+#run-analysis-text textarea {
+  max-height: 430px !important;
+  overflow-y: auto !important;
+  resize: vertical !important;
+  line-height: 1.65 !important;
 }
 """
 
@@ -1660,7 +1668,7 @@ with gr.Blocks(
                 with gr.Column(scale=3, min_width=360, elem_id="sp-left-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>前景图片区域</div><div class='sp-subtitle'>预制前景图片 / 本地上传</div>")
-                        foreground_input = gr.Image(label="前景物体 Foreground", type="numpy", height=190)
+                        foreground_input = gr.Image(label="前景物体 Foreground", type="numpy", height=240)
                         gr.Examples(
                             examples=[
                                 os.path.join("assets", "foregrounds", "cup.png"),
@@ -1671,7 +1679,7 @@ with gr.Blocks(
                             label="预制前景图片",
                         )
                         gr.HTML("<div class='sp-section-title'>背景图片区域</div><div class='sp-subtitle'>预制背景图片 / 本地上传</div>")
-                        background_input = gr.Image(label="背景图 Background", type="numpy", height=190)
+                        background_input = gr.Image(label="背景图 Background", type="numpy", height=240)
                         gr.Examples(
                             examples=[
                                 os.path.join("assets", "backgrounds", "desk.png"),
@@ -1737,10 +1745,10 @@ with gr.Blocks(
                             value=["fos", "harmony", "pctnet"],
                             label="增强模型选择",
                         )
-                        with gr.Accordion("LibCom 增强模型参数", open=False):
+                        with gr.Accordion("LibCom 增强模型参数", open=True):
                             lbm_steps_input = gr.Slider(minimum=1, maximum=8, value=4, step=1, label="LBM steps")
                             lbm_resolution_input = gr.Slider(minimum=512, maximum=1024, value=768, step=128, label="LBM resolution")
-                        with gr.Accordion("高级解释图参数", open=False):
+                        with gr.Accordion("高级解释图参数", open=True):
                             occlusion_patch_size_input = gr.Slider(minimum=48, maximum=160, value=96, step=16, label="遮挡块大小")
                             occlusion_stride_input = gr.Slider(minimum=32, maximum=128, value=96, step=16, label="遮挡滑动步长")
 
@@ -1759,7 +1767,7 @@ with gr.Blocks(
                     score_table = gr.Dataframe(label="候选评分表", wrap=True)
                 with gr.Column(scale=5, elem_classes=["sp-card"]):
                     gr.HTML("<div class='sp-section-title'>自动分析说明</div><div class='sp-subtitle'>可直接作为汇报讲解素材。</div>")
-                    run_analysis_text = gr.Textbox(label="分析说明", lines=18)
+                    run_analysis_text = gr.Textbox(label="分析说明", lines=14, max_lines=14, elem_id="run-analysis-text")
 
         with gr.Tab("03 · 解释与案例库", id="analysis"):
             with gr.Row(equal_height=False):
