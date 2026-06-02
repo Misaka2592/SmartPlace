@@ -383,6 +383,202 @@ input, textarea {
   .sp-metric-row { grid-template-columns: 1fr; }
   .sp-card, .sp-card-tight { padding: 20px !important; }
 }
+
+/* Workspace style inspired by LibCom: restrained, tool-first, thin borders. */
+:root {
+  --sp-bg: #f7f8fb;
+  --sp-panel: #ffffff;
+  --sp-ink: #1f2937;
+  --sp-muted: #8a94a6;
+  --sp-primary: #2563eb;
+  --sp-primary-2: #2563eb;
+  --sp-border: #e6e9ef;
+  --sp-shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --sp-shadow-float: 0 8px 24px rgba(15, 23, 42, 0.06);
+  --sp-radius-sm: 6px;
+  --sp-radius-md: 8px;
+  --sp-radius-lg: 10px;
+}
+html, body { background: var(--sp-bg) !important; }
+.gradio-container {
+  max-width: 100% !important;
+  padding: 0 !important;
+  background: #f7f8fb !important;
+}
+#sp-app-frame {
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 0 18px 22px 92px;
+  border: 0;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+#sp-app-frame::before { display: none !important; }
+#sp-app-inner { padding: 0 !important; }
+#sp-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  min-height: 78px;
+  margin: 0 -18px 16px -92px !important;
+  padding: 16px 24px 16px 92px;
+  background: rgba(247,248,251,0.96);
+  border-bottom: 1px solid var(--sp-border);
+  backdrop-filter: blur(12px);
+}
+.sp-brand {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 30;
+  width: 72px;
+  padding: 26px 10px;
+  display: flex !important;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  background: #ffffff;
+  border-right: 1px solid var(--sp-border);
+  box-shadow: 1px 0 0 rgba(15,23,42,0.02);
+}
+.sp-logo {
+  width: 38px !important;
+  height: 38px !important;
+  border-radius: 8px !important;
+  display: grid;
+  place-items: center;
+  background: #111827 !important;
+  color: #ffffff !important;
+  font-weight: 800;
+  box-shadow: none !important;
+}
+.sp-brand h1 {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  letter-spacing: 0.12em !important;
+  color: #111827 !important;
+  font-weight: 760;
+  font-size: 14px !important;
+  line-height: 1.35;
+  margin: 0 !important;
+}
+.sp-brand p { display: none !important; }
+.sp-pill {
+  border-radius: 999px;
+  background: #ffffff !important;
+  border: 1px solid var(--sp-border) !important;
+  box-shadow: none !important;
+  color: #5f6b7a !important;
+}
+.sp-pill-dot { background: #22c55e !important; box-shadow: none !important; }
+#sp-hero-grid { display: none !important; }
+.sp-metric-row {
+  margin: 0 0 14px 92px !important;
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  gap: 10px !important;
+}
+.sp-metric {
+  border-radius: 8px !important;
+  padding: 13px 14px !important;
+  background: #ffffff !important;
+  border: 1px solid var(--sp-border) !important;
+  box-shadow: var(--sp-shadow-card) !important;
+}
+.sp-metric::before { display: none !important; }
+.sp-metric .label { color: #8a94a6 !important; font-size: 12px !important; font-weight: 600 !important; }
+.sp-metric .value { color: #1f2937 !important; font-size: 15px !important; font-weight: 760 !important; }
+.sp-card, .sp-card-tight {
+  border-radius: 8px !important;
+  background: #ffffff !important;
+  border: 1px solid var(--sp-border) !important;
+  box-shadow: var(--sp-shadow-card) !important;
+  backdrop-filter: none !important;
+  overflow: hidden;
+}
+.sp-card::before, .sp-card-tight::before { display: none !important; }
+.sp-card { padding: 16px !important; }
+.sp-card-tight { padding: 14px !important; }
+.sp-section-title {
+  color: #1f2937 !important;
+  font-size: 17px !important;
+  font-weight: 760 !important;
+  margin: 0 0 6px 0 !important;
+  letter-spacing: 0 !important;
+}
+.sp-section-title::before {
+  width: 3px !important;
+  height: 16px !important;
+  border-radius: 3px !important;
+  background: #2563eb !important;
+  box-shadow: none !important;
+}
+.sp-subtitle {
+  margin: 0 0 14px 13px !important;
+  color: #8a94a6 !important;
+  font-size: 13px !important;
+  line-height: 1.6 !important;
+}
+.sp-guide-step { border-radius: 8px !important; background: #f8fafc !important; border: 1px solid #edf0f5 !important; }
+.sp-guide-num { border-radius: 6px !important; background: #eef4ff !important; color: #2563eb !important; box-shadow: none !important; }
+.tabs, .tabitem, .tabitem > div { border-radius: 0 !important; }
+.tab-nav {
+  gap: 0 !important;
+  border-bottom: 1px solid var(--sp-border) !important;
+  background: #ffffff !important;
+  padding: 0 10px !important;
+}
+.tab-nav button {
+  border-radius: 0 !important;
+  padding: 13px 16px !important;
+  color: #7b8494 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  border-bottom: 2px solid transparent !important;
+}
+.tab-nav button.selected {
+  color: #111827 !important;
+  background: transparent !important;
+  border-bottom-color: #2563eb !important;
+  box-shadow: none !important;
+}
+button, .gradio-button {
+  border-radius: 6px !important;
+  min-height: 38px !important;
+  font-weight: 650 !important;
+  letter-spacing: 0 !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+button.primary, .gradio-button.primary, .sp-blue button, .sp-green button {
+  background: #111827 !important;
+  color: #ffffff !important;
+  border: 1px solid #111827 !important;
+  box-shadow: none !important;
+}
+.sp-danger button {
+  background: #ffffff !important;
+  color: #b42318 !important;
+  border: 1px solid #f1b5ad !important;
+  box-shadow: none !important;
+}
+textarea, input, select, .wrap, .dataframe, .table-wrap, .image-container, .gallery, .gallery > div, .file-preview, .download-button, .accordion {
+  border-radius: 8px !important;
+}
+input, textarea { background: #ffffff !important; border-color: var(--sp-border) !important; }
+.dataframe th { background: #f8fafc !important; color: #334155 !important; }
+#canvas-shell iframe {
+  border-radius: 8px !important;
+  border: 1px solid var(--sp-border) !important;
+  box-shadow: none !important;
+}
+@media (max-width: 900px) {
+  #sp-app-frame { padding-left: 18px; }
+  .sp-brand { display: none !important; }
+  #sp-topbar { margin-left: -18px !important; padding-left: 24px; }
+  .sp-metric-row { margin-left: 0 !important; }
+}
 """
 
 
@@ -1357,9 +1553,44 @@ with gr.Blocks(
 </div>
                         """)
 
+                        gr.HTML("""
+<div class="sp-section-title">AI工具</div>
+<div class="sp-subtitle">基础合成、图像和谐化、热力图与评分分析会在右侧工作区展示。</div>
+<div class="sp-mini-guide">
+  <div class="sp-guide-step"><div class="sp-guide-num">A</div><div><b>基础合成</b><span>将前景图像合成到背景图像上</span></div></div>
+  <div class="sp-guide-step"><div class="sp-guide-num">H</div><div><b>图像和谐化</b><span>PCTNet / LBM 调整前景光照和色彩</span></div></div>
+  <div class="sp-guide-step"><div class="sp-guide-num">F</div><div><b>前景放置热力图</b><span>FOPA 预测位置与尺度合理性</span></div></div>
+  <div class="sp-guide-step"><div class="sp-guide-num">S</div><div><b>评分分析</b><span>OPA / FOS / HarmonyScore 多角度评分</span></div></div>
+</div>
+                        """)
+
                         gr.HTML("<div class='sp-section-title'>素材输入</div><div class='sp-subtitle'>建议使用清晰背景图和边界明确的前景图，展示效果会更稳定。</div>")
-                        background_input = gr.Image(label="背景图 Background", type="numpy", height=320)
-                        foreground_input = gr.Image(label="前景物体 Foreground", type="numpy", height=320)
+                        gr.HTML("<div class='sp-section-title'>前景图片区域</div><div class='sp-subtitle'>预制前景图片 / 本地上传</div>")
+                        foreground_input = gr.Image(label="前景物体 Foreground", type="numpy", height=260)
+                        gr.Examples(
+                            examples=[
+                                os.path.join("assets", "foregrounds", "cup.png"),
+                                os.path.join("assets", "foregrounds", "chair.png"),
+                                os.path.join("assets", "foregrounds", "car.png"),
+                                os.path.join("assets", "foregrounds", "bag.png"),
+                                os.path.join("assets", "foregrounds", "dog.png"),
+                            ],
+                            inputs=foreground_input,
+                            label="预制前景图片",
+                        )
+                        gr.HTML("<div class='sp-section-title'>背景图片区域</div><div class='sp-subtitle'>预制背景图片 / 本地上传</div>")
+                        background_input = gr.Image(label="背景图 Background", type="numpy", height=260)
+                        gr.Examples(
+                            examples=[
+                                os.path.join("assets", "backgrounds", "desk.png"),
+                                os.path.join("assets", "backgrounds", "classroom.png"),
+                                os.path.join("assets", "backgrounds", "street.png"),
+                                os.path.join("assets", "backgrounds", "hall.png"),
+                                os.path.join("assets", "backgrounds", "grass.png"),
+                            ],
+                            inputs=background_input,
+                            label="预制背景图片",
+                        )
 
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>案例记录</div><div class='sp-subtitle'>用于生成项目报告和案例汇总，可以先保持默认。</div>")
