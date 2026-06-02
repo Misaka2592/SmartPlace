@@ -650,12 +650,12 @@ button, .gradio-button {
 }
 #sp-center-panel {
   flex: 1 1 auto !important;
-  min-width: 560px !important;
+  min-width: 520px !important;
 }
 #sp-right-panel {
-  flex: 0 1 clamp(380px, 23vw, 500px) !important;
-  min-width: 380px !important;
-  max-width: 500px !important;
+  flex: 0 1 clamp(460px, 28vw, 560px) !important;
+  min-width: 460px !important;
+  max-width: 560px !important;
 }
 #sp-left-panel .sp-card {
   min-height: calc(100vh - 150px) !important;
@@ -666,15 +666,27 @@ button, .gradio-button {
   min-height: calc(100vh - 150px) !important;
   max-height: none !important;
   overflow-y: visible !important;
-  overflow-x: hidden !important;
+  overflow-x: visible !important;
 }
 #sp-right-panel .accordion,
 #sp-right-panel .form,
 #sp-right-panel .block,
 #sp-right-panel .wrap {
   max-width: 100% !important;
-  overflow-x: hidden !important;
+  overflow: visible !important;
   box-sizing: border-box !important;
+}
+#sp-right-panel .form,
+#sp-right-panel .block {
+  min-height: auto !important;
+  height: auto !important;
+}
+#sp-right-panel input {
+  min-height: 42px !important;
+}
+#sp-right-panel label,
+#sp-right-panel .wrap {
+  min-height: 52px !important;
 }
 #sp-right-panel label,
 #sp-right-panel .label-wrap,
@@ -1662,7 +1674,7 @@ with gr.Blocks(
         """
     )
 
-    with gr.Tabs():
+    with gr.Tabs(selected="workspace") as main_tabs:
         with gr.Tab("01 · 创作工作台", id="workspace"):
             with gr.Row(equal_height=False, elem_id="workspace-main-row"):
                 with gr.Column(scale=3, min_width=360, elem_id="sp-left-panel"):
@@ -1696,16 +1708,16 @@ with gr.Blocks(
                     manual_label_input = gr.State("未填写")
                     manual_reason_input = gr.State("")
 
-                with gr.Column(scale=6, min_width=560, elem_id="sp-center-panel"):
+                with gr.Column(scale=6, min_width=520, elem_id="sp-center-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>交互画布</div><div class='sp-subtitle'>在画布中拖动物体，记录多个候选位置后再统一评分。</div>")
                         drag_canvas_html = gr.HTML(label="拖拽画布", elem_id="canvas-shell")
                         with gr.Row():
                             load_canvas_button = gr.Button("加载 / 刷新拖拽画布", variant="primary", elem_classes=["sp-blue"])
-                            add_candidate_button = gr.Button("记录当前位置为候选", variant="secondary")
+                            add_candidate_button = gr.Button("记录当前位置为候选", variant="primary", elem_classes=["sp-blue"])
                         with gr.Row():
-                            clear_candidate_button = gr.Button("清空候选", elem_classes=["sp-danger"])
-                            score_button = gr.Button("批量评分并生成结果", variant="primary", elem_classes=["sp-green"])
+                            clear_candidate_button = gr.Button("清空候选", variant="primary", elem_classes=["sp-blue"])
+                            score_button = gr.Button("批量评分并生成结果", variant="primary", elem_classes=["sp-blue"])
 
                     with gr.Row(equal_height=False):
                         with gr.Column(scale=1, elem_classes=["sp-card-tight", "sp-preview-card"]):
@@ -1724,7 +1736,7 @@ with gr.Blocks(
                             drag_y_input = gr.Textbox(label="当前 y", value="0", elem_id="drag_y_input")
                             drag_scale_input = gr.Textbox(label="当前 scale", value="0.25", elem_id="drag_scale_input")
 
-                with gr.Column(scale=3, min_width=380, elem_id="sp-right-panel"):
+                with gr.Column(scale=3, min_width=460, elem_id="sp-right-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>模型与参数</div><div class='sp-subtitle'>参数越少越适合演示，更多选项已收纳。</div>")
                         mask_mode_input = gr.State(cfg.get("mask_processor", {}).get("default_mode", "自动判断"))
@@ -1828,7 +1840,7 @@ with gr.Blocks(
         outputs=[candidate_points_state, candidate_points_table],
     )
 
-    score_button.click(
+    score_event = score_button.click(
         fn=score_drag_candidates,
         inputs=[
             bg_state,
@@ -1869,6 +1881,11 @@ with gr.Blocks(
             case_summary_csv_file,
             case_summary_md_file,
         ],
+    )
+    score_event.then(
+        fn=lambda: gr.update(selected="results"),
+        inputs=[],
+        outputs=[main_tabs],
     )
 
 
