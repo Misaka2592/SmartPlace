@@ -1,6 +1,8 @@
 import base64
 import html as html_lib
+import json
 import os
+import subprocess
 import time
 from io import BytesIO
 from typing import Any, Dict, List, Tuple
@@ -11,6 +13,7 @@ import yaml
 from PIL import Image
 
 from models.libcom_opa_subprocess_scorer import LibcomOPASubprocessScorer
+from models.libcom_multimodel_subprocess import LibcomMultiModelSubprocess
 from utils.composer import compose_image_with_mask, resize_foreground
 from utils.scoring import format_score, analyze_candidate, summarize_run
 from utils.logger import InferenceLogger
@@ -416,6 +419,15 @@ scorer = LibcomOPASubprocessScorer(
     device=libcom_cfg.get("device", "cuda:0"),
     model_type=libcom_cfg.get("model_type", "SimOPA"),
     temp_dir=libcom_cfg.get("temp_dir", "outputs/libcom_subprocess"),
+    logger=logger,
+)
+
+multi_cfg = scorer_cfg.get("libcom_multimodel", {})
+libcom_multimodel = LibcomMultiModelSubprocess(
+    python_path=multi_cfg.get("python_path", libcom_cfg.get("python_path", ".venv_libcom/Scripts/python.exe")),
+    script_path=multi_cfg.get("script_path", "scripts/libcom_multi_model_infer.py"),
+    device=multi_cfg.get("device", libcom_cfg.get("device", "cuda:0")),
+    temp_dir=multi_cfg.get("temp_dir", "outputs/libcom_multimodel"),
     logger=logger,
 )
 
@@ -991,6 +1003,10 @@ def score_drag_candidates(
     enable_explanation,
     occlusion_patch_size,
     occlusion_stride,
+    enable_libcom_suite,
+    libcom_suite_models,
+    lbm_steps,
+    lbm_resolution,
     case_name,
     background_note,
     foreground_note,
@@ -1079,6 +1095,8 @@ def score_drag_candidates(
     explanation_text = ""
     explanation_overlay_path = None
     explanation_report_path = None
+    libcom_suite_text = "未运行 LibCom 增强模型。"
+    libcom_suite_gallery = []
 
     if enable_explanation and ranked:
         top1 = ranked[0]
@@ -1100,6 +1118,27 @@ def score_drag_candidates(
         )
         explanation_text = explanation_result["explanation"]
         explanation_gallery.append((explanation_overlay_path, f"候选 {top1['id']} 遮挡实验热力图"))
+
+    if enable_libcom_suite and ranked:
+        top1 = ranked[0]
+        selected_models = list(libcom_suite_models or [])
+        logger.section("[SmartPlace-Drag] Start LibCom multi-model suite for Top-1 candidate")
+        try:
+            suite_output = libcom_multimodel.run(
+                background=background,
+                foreground=foreground,
+                composite=top1["image"],
+                composite_mask=top1["candidate_info"]["composite_mask"],
+                candidate_info=top1["candidate_info"],
+                models=selected_models,
+                lbm_steps=int(lbm_steps),
+                lbm_resolution=int(lbm_resolution),
+                run_id=f"{run_id}_candidate_{top1['id']}",
+            )
+            libcom_suite_text, libcom_suite_gallery = libcom_multimodel.build_ui_payload(suite_output)
+        except Exception as exc:
+            libcom_suite_text = f"LibCom 增强模型运行失败：{repr(exc)}"
+            libcom_suite_gallery = []
 
     table_rows = []
     for item in results:
@@ -1211,6 +1250,8 @@ def score_drag_candidates(
         df,
         run_analysis_text,
         explanation_gallery,
+        libcom_suite_text,
+        libcom_suite_gallery,
         case_summary_df,
         csv_path,
         log_path,
@@ -1381,6 +1422,15 @@ with gr.Blocks(
                         top_k_input = gr.Slider(minimum=1, maximum=5, value=3, step=1, label="Top-K 数量")
                         filter_out_of_bounds_input = gr.Checkbox(value=True, label="过滤明显越界候选")
                         enable_explanation_input = gr.Checkbox(value=False, label="生成模型解释图（较慢）")
+                        enable_libcom_suite_input = gr.Checkbox(value=False, label="启用 LibCom 增强模型（较慢）")
+                        libcom_suite_models_input = gr.CheckboxGroup(
+                            choices=["fopa", "fos", "harmony", "pctnet", "lbm"],
+                            value=["fos", "harmony", "pctnet"],
+                            label="增强模型选择",
+                        )
+                        with gr.Accordion("LibCom 增强模型参数", open=False):
+                            lbm_steps_input = gr.Slider(minimum=1, maximum=8, value=4, step=1, label="LBM steps")
+                            lbm_resolution_input = gr.Slider(minimum=512, maximum=1024, value=768, step=128, label="LBM resolution")
                         with gr.Accordion("高级解释图参数", open=False):
                             occlusion_patch_size_input = gr.Slider(minimum=48, maximum=160, value=96, step=16, label="遮挡块大小")
                             occlusion_stride_input = gr.Slider(minimum=32, maximum=128, value=96, step=16, label="遮挡滑动步长")
@@ -1411,6 +1461,9 @@ with gr.Blocks(
                 with gr.Column(scale=1, elem_classes=["sp-card"]):
                     gr.HTML("<div class='sp-section-title'>模型解释图</div><div class='sp-subtitle'>开启解释后，对 Top-1 候选做遮挡实验，显示影响区域。</div>")
                     explanation_gallery = gr.Gallery(label="遮挡实验热力图", columns=1, height="auto")
+                    gr.HTML("<div class='sp-section-title'>LibCom 增强模型</div><div class='sp-subtitle'>可选运行 FOPA、FOS、HarmonyScore、PCTNet、LBM，对 Top-1 候选做进一步评估与协调。</div>")
+                    libcom_suite_gallery = gr.Gallery(label="FOPA 热力图 / 协调结果", columns=1, height="auto")
+                    libcom_suite_text = gr.Textbox(label="多模型结果摘要", lines=12)
                 with gr.Column(scale=1, elem_classes=["sp-card"]):
                     gr.HTML("<div class='sp-section-title'>测试案例汇总</div><div class='sp-subtitle'>所有评分案例会自动沉淀，方便报告展示。</div>")
                     case_summary_table = gr.Dataframe(label="所有已记录案例汇总", wrap=True)
@@ -1474,6 +1527,10 @@ with gr.Blocks(
             enable_explanation_input,
             occlusion_patch_size_input,
             occlusion_stride_input,
+            enable_libcom_suite_input,
+            libcom_suite_models_input,
+            lbm_steps_input,
+            lbm_resolution_input,
             case_name_input,
             background_note_input,
             foreground_note_input,
@@ -1487,6 +1544,8 @@ with gr.Blocks(
             score_table,
             run_analysis_text,
             explanation_gallery,
+            libcom_suite_text,
+            libcom_suite_gallery,
             case_summary_table,
             csv_file,
             log_file,

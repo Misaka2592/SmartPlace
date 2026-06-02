@@ -11,6 +11,12 @@ scorer:
     device: cuda:0
     model_type: SimOPA
     temp_dir: outputs/libcom_subprocess
+  libcom_multimodel:
+    name: LibcomMultiModelSubprocess
+    python_path: .venv_libcom/Scripts/python.exe
+    script_path: scripts/libcom_multi_model_infer.py
+    device: cuda:0
+    temp_dir: outputs/libcom_multimodel
 
 mask_processor:
   default_mode: 自动判断
