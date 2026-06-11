@@ -39,7 +39,16 @@ SmartPlace 是一个本地运行的前景放置推荐与合成图像分析系统
 先克隆 SmartPlace 仓库：
 
 ```bash
-cd D:\Programming\PythonTest\SmartPlace
+git clone <你的 SmartPlace 仓库地址>
+cd SmartPlace
+```
+
+注意：
+
+`third_party/libcom/` 当前没有提交到仓库，因为它被 `.gitignore` 忽略了。  
+所以每个组员都需要额外把 `libcom` 克隆到 `third_party/libcom`：
+
+```bash
 git clone https://github.com/bcmi/libcom.git third_party/libcom
 ```
 
@@ -174,5 +183,3 @@ git clone https://github.com/bcmi/libcom.git third_party/libcom
 ```text
 检查 assets/foregrounds/ 和 assets/backgrounds/ 中是否真的有图片文件。
 ```
-
-
