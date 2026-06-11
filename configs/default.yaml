@@ -6,11 +6,11 @@ scorer:
   active_backend: handin_opa_subprocess
   handin_opa_subprocess:
     name: HandinOPASubprocessScorer
-    python_path: ../handin/.venv/Scripts/python.exe
+    python_path: handin/.venv/Scripts/python.exe
     script_path: scripts/handin_opa_infer_once.py
     batch_script_path: scripts/handin_opa_infer_batch.py
-    handin_root: ../handin
-    weight_path: ../handin/experiments/ablation_study/resnet18_w05_20260609_161229/checkpoints/resnet18_w05_best-acc-0.718_epoch15_f1-0.614.pth
+    handin_root: handin
+    weight_path: handin/experiments/ablation_study/resnet18_w05_20260609_161229/checkpoints/resnet18_w05_best-acc-0.718_epoch15_f1-0.614.pth
     model_name: resnet
     layers: 18
     width_factor: 0.5
@@ -46,11 +46,11 @@ mask_processor:
   edge_sample_ratio: 0.08
 
 u2net:
-  python_path: ../handin/.venv/Scripts/python.exe
+  python_path: handin/.venv/Scripts/python.exe
   script_path: scripts/handin_u2net_infer_once.py
-  handin_root: ../handin
+  handin_root: handin
   model_type: u2netp
-  weight_path: ../handin/u2netp.pth
+  weight_path: handin/u2netp.pth
   device: cpu
   threshold: 0.5
   temp_dir: outputs/handin_u2net
@@ -65,6 +65,9 @@ output:
   save_csv: true
   save_log: true
   save_mask: true
+  save_zip: true
+  log_dir: outputs/logs
+  zip_dir: outputs/zips
 
 auto_search:
   coarse_n: 4

@@ -13,18 +13,18 @@ class HandinU2NetSubprocessMatting:
     def __init__(
         self,
         python_path: str = "../handin/.venv/Scripts/python.exe",
-        script_path: str = "scripts/handin_u2net_infer_once.py",
+        script_path: str = "../scripts/handin_u2net_infer_once.py",
         handin_root: str = "../handin",
         model_type: str = "u2netp",
         weight_path: str = "../handin/u2netp.pth",
         device: str = "cpu",
         threshold: float = 0.5,
-        temp_dir: str = "outputs/handin_u2net",
+        temp_dir: str = "../outputs/handin_u2net",
         timeout_seconds: int = 120,
         logger: InferenceLogger = None,
     ):
         self.python_path = os.path.normpath(python_path)
-        self.script_path = os.path.normpath(script_path)
+        self.script_path = script_path
         self.handin_root = os.path.normpath(handin_root)
         self.model_type = model_type
         self.weight_path = os.path.normpath(weight_path)
@@ -49,10 +49,12 @@ class HandinU2NetSubprocessMatting:
         mask_path = os.path.join(self.temp_dir, f"{timestamp}_mask.png")
         image.convert("RGBA").save(input_path)
 
+        self.logger.log(f"[DEBUG LOG BEGINS]")
         self.logger.log(f"[HandinU2Net-Subprocess] python_path={self.python_path}")
         self.logger.log(f"[HandinU2Net-Subprocess] script_path={self.script_path}")
         self.logger.log(f"[HandinU2Net-Subprocess] handin_root={self.handin_root}")
         self.logger.log(f"[HandinU2Net-Subprocess] input_path={input_path}")
+        self.logger.log(f"[DEBUG LOG ENDS]")
 
         cmd = [
             self.python_path,
@@ -68,6 +70,9 @@ class HandinU2NetSubprocessMatting:
         ]
 
         start = time.time()
+        self.logger.log(f"[DEBUG] START TIME: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start))}")
+        self.logger.log(f"[DEBUG] CMD: {' '.join(cmd)}")
+
         try:
             proc = subprocess.run(
                 cmd,
