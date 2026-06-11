@@ -15,6 +15,10 @@ from PIL import Image
 from models.libcom_opa_subprocess_scorer import LibcomOPASubprocessScorer
 from models.smartplace_opa_calibrated_scorer import SmartPlaceOPACalibratedScorer
 from models.libcom_multimodel_subprocess import LibcomMultiModelSubprocess
+from models.libcom_opa_subprocess_scorer import LibcomOPASubprocessScorer
+from models.smartplace_opa_calibrated_scorer import SmartPlaceOPACalibratedScorer
+from models.libcom_multimodel_subprocess import LibcomMultiModelSubprocess
+from models.dummy_scorer import DummyScorer
 from utils.composer import compose_image_with_mask, resize_foreground
 from utils.scoring import format_score, analyze_candidate, summarize_run
 from utils.logger import InferenceLogger
@@ -35,6 +39,11 @@ from utils.case_manager import (
     export_case_summary_markdown,
 )
 from utils.auto_candidate_area_search import auto_candidate_area_search
+from utils.composer import compose_image_with_mask, resize_foreground
+
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
 def collect_preset_images(folder: str, limit: int = 6) -> List[str]:
@@ -1042,6 +1051,7 @@ def add_current_candidate(candidate_points, drag_x, drag_y, drag_scale):
 def clear_candidates():
     return [], pd.DataFrame(columns=["候选编号", "x", "y", "scale"])
 
+
 def run_auto_search(
         bg_state,
         fg_state,
@@ -1054,84 +1064,90 @@ def run_auto_search(
         auto_samples_per_cell,
         auto_fine_a,
         auto_fine_b,
+        source_html
 ):
     """运行自动搜索，将最优位置呈现在画布上并加入候选列表。"""
     if bg_state is None or fg_state is None:
-        raise gr.Error("请先点击“加载拖拽画布”。")
+        raise gr.Error('请先点击"加载拖拽画布"。')
 
-        background = bg_state.convert("RGB")
-        foreground = fg_state.convert("RGBA")
-        scale = float(scale)
-        determine_coeff = int(determine_coeff)
+    background = bg_state.convert("RGB")
+    foreground = fg_state.convert("RGBA")
+    scale = float(scale)
+    determine_coeff = int(determine_coeff)
 
-        logger.section("[SmartPlace-AutoSearch] Start auto candidate area search")
+    logger.section("[SmartPlace-AutoSearch] Start auto candidate area search")
 
         # 调用自动搜索接口（参数优先级：显式 > 配置文件 > 默认值）
-        search_result = auto_candidate_area_search(
-            background=background,
-            foreground=foreground,
-            scorer=scorer,
-            n=int(auto_coarse_n),
-            m=int(auto_coarse_m),
-            r=int(auto_samples_per_cell),
-            a=int(auto_fine_a),
-            b=int(auto_fine_b),
-            determine_coeff=determine_coeff,
-            scale=scale,
-            logger=logger,
-        )
+    search_result = auto_candidate_area_search(
+        background=background,
+        foreground=foreground,
+        scorer=scorer,
+        n=int(auto_coarse_n),
+        m=int(auto_coarse_m),
+        r=int(auto_samples_per_cell),
+        a=int(auto_fine_a),
+        b=int(auto_fine_b),
+        determine_coeff=determine_coeff,
+        scale=scale,
+        logger=logger,
+    )
 
-        best = search_result.get("best")
-        top_k = search_result.get("top_k", [])
-        summary = search_result.get("search_summary", {})
+    best = search_result.get("best")
+    top_k = search_result.get("top_k", [])
+    summary = search_result.get("search_summary", {})
 
-        if best is None:
-            raise gr.Error("自动搜索未找到有效位置，请检查前景/背景是否已加载。")
+    if best is None:
+        raise gr.Error("自动搜索未找到有效位置，请检查前景/背景是否已加载。")
 
-        best_x = int(best["x"])
-        best_y = int(best["y"])
-        best_score = best["score"]
+    best_x = int(best["x"] or 0)
+    best_y = int(best["y"] or 0)
+    best_score = best["score"] or 0.0
 
-        logger.log(f"[AutoSearch] Best position: x={best_x}, y={best_y}, score={best_score:.6f}")
+    logger.log(f"[AutoSearch] Best position: x={best_x}, y={best_y}, score={best_score:.6f}")
 
         # 重建画布，将前景移到最优位置
-        iframe_html = _build_drag_canvas_html(background, foreground, scale, best_x, best_y)
+    iframe_html = _build_drag_canvas_html(background, foreground, scale, best_x, best_y)
+    if iframe_html is None:
+        iframe_html = source_html
 
         # 将 top_k 全部加入候选列表（画布只呈现 #1 位置）
-        candidate_points = list(candidate_points or [])
-        existing_count = len(candidate_points)
+    candidate_points = list(candidate_points or [])
+    existing_count = len(candidate_points)
 
-        for idx, item in enumerate(top_k):
-            cid = existing_count + idx + 1
-            candidate_points.append({
-                "id": cid,
-                "x": int(item["x"]),
-                "y": int(item["y"]),
-                "scale": scale,
-            })
+    for idx, item in enumerate(top_k):
+        cid = existing_count + idx + 1
+        candidate_points.append({
+            "id": cid,
+            "x": int(item["x"]),
+            "y": int(item["y"]),
+            "scale": scale,
+        })
 
-        candidate_df = pd.DataFrame([
-            {"候选编号": p["id"], "x": p["x"], "y": p["y"], "scale": p["scale"]}
-            for p in candidate_points
-        ])
+    candidate_df = pd.DataFrame([
+        {"候选编号": p["id"], "x": p["x"], "y": p["y"], "scale": p["scale"]}
+        for p in candidate_points
+    ])
+    if candidate_df is None:
+        candidate_df = pd.DataFrame([{"候选编号": 1, "x": 0, "y": 0, "scale": scale}])
 
-        drag_mode = (
-            f"自动搜索完成：粗搜索 {summary.get('coarse_grid', '?')} → "
-            f"细搜索 {summary.get('fine_grid', '?')}，"
-            f"determine_coeff={determine_coeff}，"
-            f"最优位置=({best_x}, {best_y})，分数={best_score:.4f}。"
-            f"已将 Top-{len(top_k)} 结果加入候选列表。"
-        )
+    drag_mode = (
+        f"自动搜索完成：粗搜索 {summary.get('coarse_grid', '?')} → "
+        f"细搜索 {summary.get('fine_grid', '?')}，"
+        f"determine_coeff={determine_coeff}，"
+        f"最优位置=({best_x}, {best_y})，分数={best_score:.4f}。"
+        f"已将 Top-{len(top_k)} 结果加入候选列表。"
+    )
 
-        return (
-            iframe_html,
-            candidate_points,
-            candidate_df,
-            str(best_x),
-            str(best_y),
-            str(scale),
-            drag_mode,
-        )
+    return (
+        iframe_html,
+        candidate_points,
+        candidate_df,
+        str(best_x),
+        str(best_y),
+        str(scale),
+        drag_mode,
+    )
+
 
 def _build_drag_canvas_html(background, foreground_rgba, scale, init_x, init_y):
     """
@@ -2045,6 +2061,7 @@ with gr.Blocks(
             auto_samples_per_cell_input,
             auto_fine_a_input,
             auto_fine_b_input,
+            drag_canvas_html,
         ],
         outputs=[
             drag_canvas_html,

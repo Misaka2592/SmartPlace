@@ -4,13 +4,10 @@ auto_candidate_area_search — 自动候选区域搜索主入口
 采用粗细两级搜索策略，自动寻找前景在背景图中最合理的放置区域：
 
 1. 粗搜索：将后景图划分为 n×m 大网格，每个大网格内随机采样 r 个点作为放置中心，
-   合成并评分，取平均值作为该大网格的合理度。
+   使用 DummyScorer（启发式评分器）快速评分，取平均值作为该大网格的合理度。
 2. 细搜索：选出合理度最高的 determine_coeff 个大网格，将每个大网格细分为 a×b 小网格，
-   逐格计算合理度。
-3. 最终：在所有小网格中统一排序，取合理度最高的位置。
-
-determine_coeff 仅决定粗搜索阶段选出多少个大网格进入细搜索，
-不影响第二轮——第二轮是所有小网格全局比较取最优。
+   使用 OPA 模型（scorer）精确评分。
+3. 最终：在所有细搜索结果中按 OPA 分数统一排序，取合理度最高的位置。
 
 参数优先级：显式传入 > config/default.yaml 中 auto_search 节 > 代码硬编码默认值
 """
@@ -22,9 +19,11 @@ import yaml
 from PIL import Image
 
 from models.base_scorer import BaseScorer
-from utils.composer import resize_foreground
+from models.dummy_scorer import DummyScorer
+from utils.composer import resize_foreground, compose_image_with_mask
 from utils.logger import InferenceLogger
 from utils.mask_processor import process_foreground_for_composition
+from utils.scoring import analyze_candidate
 from utils.auto_candidate_area_search_helper import (
     compute_grid_layout,
     generate_coarse_candidates,
@@ -66,16 +65,6 @@ def load_auto_search_config(config_path: str = _DEFAULT_CONFIG_PATH) -> Dict[str
 
     如果配置文件不存在或没有 auto_search 节，则返回空字典，
     后续会回退到 _HARD_DEFAULTS。
-
-    Parameters
-    ----------
-    config_path : str
-        配置文件路径。
-
-    Returns
-    -------
-    dict
-        auto_search 节的配置字典。
     """
     if not os.path.exists(config_path):
         return {}
@@ -100,6 +89,80 @@ def _resolve(
     if key in config:
         return config[key]
     return _HARD_DEFAULTS.get(key)
+
+
+# ---------------------------------------------------------------------------
+# 内部工具：对候选列表使用指定评分器重新评分
+# ---------------------------------------------------------------------------
+
+def _rescore_candidates(
+        candidates: List[Dict[str, Any]],
+        background: Image.Image,
+        foreground_rgba: Image.Image,
+        scale: float,
+        scorer: BaseScorer,
+        allow_out_of_bounds: bool,
+        batch_size: int,
+        logger: InferenceLogger,
+) -> List[Dict[str, Any]]:
+    """
+    对已有的候选列表重新合成并使用指定评分器评分。
+
+    仅在回退路径中使用（粗搜索结果需要 OPA 重新评分时）。
+    """
+    if not candidates:
+        return []
+
+    composites: List[Image.Image] = []
+    infos: List[Dict] = []
+
+    for cand in candidates:
+        composite, composite_mask, info = compose_image_with_mask(
+            background=background,
+            foreground=foreground_rgba,
+            x=cand["x"],
+            y=cand["y"],
+            scale=scale,
+            allow_out_of_bounds=allow_out_of_bounds,
+        )
+        info["composite_mask"] = composite_mask
+        info["candidate_id"] = cand["id"]
+        composites.append(composite)
+        infos.append(info)
+
+    all_scores: List[float] = []
+    for i in range(0, len(composites), batch_size):
+        batch_imgs = composites[i: i + batch_size]
+        batch_infos = infos[i: i + batch_size]
+        batch_scores = scorer.batch_score(batch_imgs, batch_infos)
+        all_scores.extend(batch_scores)
+
+    results = []
+    for cand, composite, info, score in zip(candidates, composites, infos, all_scores):
+        score = float(score)
+        analysis = analyze_candidate(info, score)
+        results.append({
+            **cand,
+            "scale": scale,
+            "score": score,
+            "label": analysis["label"],
+            "reason": analysis["reason"],
+            "conclusion": analysis["conclusion"],
+            "problems": analysis["problems"],
+            "strengths": analysis["strengths"],
+            "area_ratio": analysis["area_ratio"],
+            "x_center_ratio": analysis["x_center_ratio"],
+            "y_center_ratio": analysis["y_center_ratio"],
+            "out_of_bounds": info.get("out_of_bounds", False),
+            "fg_width": info.get("fg_width"),
+            "fg_height": info.get("fg_height"),
+            "bg_width": info.get("bg_width"),
+            "bg_height": info.get("bg_height"),
+            "candidate_info": info,
+            "image": composite,
+        })
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -136,82 +199,15 @@ def auto_candidate_area_search(
     """
     自动搜索前景在背景图中最合理的放置区域。
 
-    参数解析优先级
-    --------------
-    显式传入（不为 None） > config/default.yaml 中 auto_search 节 > 代码硬编码默认值
-
     算法流程
     --------
     1. 粗搜索：将后景划分为 n×m 大网格，每个网格随机采样 r 个放置点，
-       合成 + 评分后取平均，得到每个大网格的平均合理度。
+       使用 DummyScorer（启发式）快速评分后取平均，
+       得到每个大网格的平均合理度。
     2. 细搜索：选出平均合理度最高的 determine_coeff 个大网格，
-       将每个大网格细分为 a×b 小网格，在每个小网格中心放置并评分。
-    3. 最终：在所有细搜索结果中统一排序，取合理度最高的位置。
-       determine_coeff 仅影响粗搜索选出几个大网格进入细搜索，
-       不影响细搜索的最终排序。
-
-    Parameters
-    ----------
-    background : PIL.Image
-        背景图。
-    foreground : PIL.Image
-        前景图。
-    scorer : BaseScorer
-        评分模型实例。
-    n, m : int or None
-        粗搜索行数、列数（大网格数量）。
-    r : int or None
-        每个大网格内随机采样点数。
-    a, b : int or None
-        细搜索行数、列数（每个大网格内的小网格数量，要求 a < n, b < m）。
-    determine_coeff : int or None
-        粗搜索阶段选出的最高合理度大网格数量，缺省 1。
-        例如设为 2 时，会选出合理度最高和第二高的大网格进入细搜索，
-        但细搜索仍然在所有小网格中统一排序取最优。
-    scale : float or None
-        前景缩放比例。
-    margin_ratio : float or None
-        边距比例。
-    allow_out_of_bounds : bool or None
-        是否允许越界合成。
-    filter_out_of_bounds : bool or None
-        是否过滤越界候选。
-    batch_size : int or None
-        批量评分大小。
-    seed : int or None
-        随机种子，设值后粗搜索采样可复现。
-        注意：显式传 None 表示"不固定种子"，若要从配置文件读取，
-        请不要传此参数（使用默认值）。
-    mask_mode : str or None
-        前景处理模式。
-    white_bg_threshold : int or None
-        白底去除阈值。
-    config_path : str
-        配置文件路径，默认 configs/default.yaml。
-    logger : InferenceLogger or None
-        日志记录器。
-
-    Returns
-    -------
-    dict
-        best : dict | None
-            最优区域 {x, y, scale, score, label, ...}。
-        top_k : list[dict]
-            细搜索 Top-K 推荐结果。
-        all_results : list[dict]
-            全部细搜索评分结果，按分数降序。
-        coarse_results : list[dict]
-            粗搜索全部评分结果。
-        coarse_cell_summary : list[dict]
-            每个大网格的平均合理度摘要。
-        selected_cells : list[dict]
-            被选入细搜索的大网格及其平均分。
-        mask_info : dict
-            前景处理信息。
-        search_summary : dict
-            搜索统计信息。
-        resolved_params : dict
-            最终生效的参数（含来源：显式 / 配置 / 默认）。
+       将每个大网格细分为 a×b 小网格，使用 OPA 模型精确评分。
+    3. 最终：在所有细搜索结果中按 OPA 分数统一排序，
+       取合理度最高的位置。determine_coeff > 1 时排序同样基于 OPA 分数。
     """
     if logger is None:
         logger = InferenceLogger()
@@ -249,6 +245,9 @@ def auto_candidate_area_search(
         seed = int(seed)
     white_bg_threshold = int(white_bg_threshold)
 
+    # 创建 dummy_scorer 仅用于粗搜索
+    dummy_scorer = DummyScorer(logger=logger)
+
     # 记录最终生效参数
     resolved_params = {
         "n": n, "m": m, "r": r,
@@ -262,6 +261,8 @@ def auto_candidate_area_search(
         "seed": seed,
         "mask_mode": mask_mode,
         "white_bg_threshold": white_bg_threshold,
+        "coarse_scorer": dummy_scorer.get_model_info().get("model_name", "unknown"),
+        "fine_scorer": scorer.get_model_info().get("model_name", "unknown"),
         "config_path": config_path,
         "config_loaded": bool(file_cfg),
     }
@@ -274,6 +275,7 @@ def auto_candidate_area_search(
     logger.log(f"[Param] fine_grid={a}x{b}, determine_coeff={determine_coeff}")
     logger.log(f"[Param] scale={scale}, margin_ratio={margin_ratio}")
     logger.log(f"[Param] filter_out_of_bounds={filter_out_of_bounds}, batch_size={batch_size}")
+    logger.log(f"[Param] coarse_scorer=dummy (fast), fine_scorer=OPA (precise)")
     logger.log(f"[Param] resolved_params={resolved_params}")
 
     # ------------------------------------------------------------------
@@ -298,9 +300,9 @@ def auto_candidate_area_search(
     logger.log(f"[Step2] resized_foreground_size=({fg_w}, {fg_h})")
 
     # ------------------------------------------------------------------
-    # Step 3: 粗搜索 — 大网格随机采样 + 评分
+    # Step 3: 粗搜索 — 大网格随机采样 + DummyScorer 快速评分
     # ------------------------------------------------------------------
-    logger.section("[AutoCandidateAreaSearch] Phase 1 — Coarse search")
+    logger.section("[AutoCandidateAreaSearch] Phase 1 — Coarse search (dummy scorer)")
 
     coarse_candidates, cells = generate_coarse_candidates(
         bg_width=bg_w,
@@ -320,7 +322,7 @@ def auto_candidate_area_search(
         foreground=foreground_rgba,
         candidates=coarse_candidates,
         scale=scale,
-        scorer=scorer,
+        scorer=dummy_scorer,
         allow_out_of_bounds=allow_out_of_bounds,
         batch_size=batch_size,
     )
@@ -351,9 +353,9 @@ def auto_candidate_area_search(
     logger.log(f"[Coarse] Selected top {len(selected_keys)} cells for fine search: {selected_keys}")
 
     # ------------------------------------------------------------------
-    # Step 5: 细搜索 — 对每个被选中的大网格细分 a×b 小网格
+    # Step 5: 细搜索 — 对每个被选中的大网格细分 a×b 小网格 + OPA 精确评分
     # ------------------------------------------------------------------
-    logger.section("[AutoCandidateAreaSearch] Phase 2 — Fine search")
+    logger.section("[AutoCandidateAreaSearch] Phase 2 — Fine search (OPA model)")
 
     # 找到选中网格对应的 cell 信息
     cell_lookup = {(c["row"], c["col"]): c for c in cells}
@@ -379,12 +381,27 @@ def auto_candidate_area_search(
 
     if not fine_candidates_all:
         logger.log("[Fine] WARNING: No fine candidates generated, falling back to coarse best")
-        coarse_sorted = sorted(coarse_valid, key=lambda x: x["score"], reverse=True)
-        best = coarse_sorted[0] if coarse_sorted else None
+        # 回退：从粗搜索结果中选 top_k，用 OPA 重新评分
+        coarse_sorted_by_dummy = sorted(coarse_valid, key=lambda x: x["score"], reverse=True)
+        fallback_top_k = coarse_sorted_by_dummy[:max(1, determine_coeff)]
+        # 用 OPA 重新评分（因为粗搜索分数是 dummy 分数）
+        opa_scored = _rescore_candidates(
+            candidates=fallback_top_k,
+            background=background,
+            foreground_rgba=foreground_rgba,
+            scale=scale,
+            scorer=scorer,
+            allow_out_of_bounds=allow_out_of_bounds,
+            batch_size=batch_size,
+            logger=logger,
+        )
+        opa_scored_sorted = sorted(opa_scored, key=lambda x: x["score"], reverse=True)
+        best = opa_scored_sorted[0] if opa_scored_sorted else None
+        top_k = opa_scored_sorted[:max(1, determine_coeff)]
         result = _build_result(
             best=best,
-            top_k=coarse_sorted[:max(1, determine_coeff)],
-            all_results=coarse_sorted,
+            top_k=top_k,
+            all_results=opa_scored_sorted,
             coarse_results=coarse_results,
             cell_stats=cell_stats,
             selected_keys=selected_keys,
@@ -398,6 +415,7 @@ def auto_candidate_area_search(
         result["resolved_params"] = resolved_params
         return result
 
+    # 细搜索直接使用 OPA 模型评分
     fine_results = compose_and_score_batch(
         background=background,
         foreground=foreground_rgba,
@@ -415,7 +433,7 @@ def auto_candidate_area_search(
     else:
         fine_valid = fine_results
 
-    # 统一排序 — determine_coeff 不影响此排名，所有小网格全局比较
+    # 按 OPA 分数统一排序 — determine_coeff 不影响此排名，所有小网格全局比较
     all_results_sorted = sorted(fine_valid, key=lambda x: x["score"], reverse=True)
 
     if not all_results_sorted:
@@ -432,7 +450,7 @@ def auto_candidate_area_search(
     if best:
         logger.log(
             f"[Best] x={best['x']}, y={best['y']}, "
-            f"scale={scale}, score={best['score']:.6f}"
+            f"scale={scale}, opa_score={best['score']:.6f}"
         )
         logger.log(f"[Best] label={best['label']}, conclusion={best.get('conclusion', '')}")
     else:
@@ -440,7 +458,7 @@ def auto_candidate_area_search(
 
     for rank, item in enumerate(top_k, 1):
         logger.log(
-            f"[Top{rank}] id={item['id']} score={item['score']:.6f} "
+            f"[Top{rank}] id={item['id']} opa_score={item['score']:.6f} "
             f"pos=({item['x']},{item['y']}) label={item['label']}"
         )
 
@@ -455,6 +473,7 @@ def auto_candidate_area_search(
         "total_fine_scored": len(fine_valid) if filter_out_of_bounds else len(fine_results),
         "best_score": best["score"] if best else None,
         "best_position": {"x": best["x"], "y": best["y"]} if best else None,
+        "scoring_strategy": "coarse=dummy, fine=OPA",
     }
     logger.log(f"[Summary] {search_summary}")
 
