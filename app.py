@@ -13,6 +13,7 @@ import yaml
 from PIL import Image
 
 from models.libcom_opa_subprocess_scorer import LibcomOPASubprocessScorer
+from models.handin_opa_subprocess_scorer import HandinOPASubprocessScorer
 from models.smartplace_opa_calibrated_scorer import SmartPlaceOPACalibratedScorer
 from models.libcom_multimodel_subprocess import LibcomMultiModelSubprocess
 from utils.composer import compose_image_with_mask, resize_foreground
@@ -26,6 +27,7 @@ from utils.explain import (
     export_explanation_markdown,
 )
 from utils.mask_processor import process_foreground_for_composition, save_processed_foreground
+from utils.handin_u2net_subprocess import HandinU2NetSubprocessMatting
 from utils.case_manager import (
     build_case_record,
     save_case_record,
@@ -46,6 +48,16 @@ def collect_preset_images(folder: str, limit: int = 6) -> List[str]:
         if name.lower().endswith(exts)
     ]
     return files[:limit]
+
+
+def format_param_value(value: Any, digits: int = 0) -> str:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if digits <= 0:
+        return str(int(round(num)))
+    return f"{num:.{digits}f}"
 
 
 CUSTOM_DRAG_JS = """
@@ -128,623 +140,684 @@ RECORD_CANDIDATE_JS = """
 
 APP_CSS = r"""
 :root {
-  --sp-bg: #f6f8fc;
+  --sp-bg: #f7fbff;
+  --sp-bg-2: #eef6ff;
   --sp-panel: rgba(255, 255, 255, 0.78);
   --sp-panel-strong: rgba(255, 255, 255, 0.94);
-  --sp-ink: #172033;
-  --sp-muted: #728098;
-  --sp-primary: #5b8def;
-  --sp-primary-2: #77c8e8;
-  --sp-mint: #8fd8c6;
-  --sp-danger: #e07a7a;
-  --sp-success: #48b99f;
-  --sp-radius-xl: 30px;
-  --sp-radius-lg: 22px;
-  --sp-radius-md: 16px;
-  --sp-shadow-float: 0 24px 70px rgba(31, 41, 55, 0.10);
-  --sp-shadow-card: 0 14px 38px rgba(31, 41, 55, 0.075);
+  --sp-border: rgba(160, 199, 237, 0.34);
+  --sp-border-strong: rgba(95, 175, 255, 0.55);
+  --sp-ink: #20304d;
+  --sp-muted: #6f7e98;
+  --sp-primary: #53b2ff;
+  --sp-primary-2: #70ead8;
+  --sp-accent: #9d8cff;
+  --sp-success: #59d9ad;
+  --sp-danger: #ff7c98;
+  --sp-radius-lg: 34px;
+  --sp-shadow-lg: 0 24px 60px rgba(114, 147, 206, 0.16);
+  --sp-shadow-md: 0 14px 30px rgba(114, 147, 206, 0.12);
+  --sp-ease: 220ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-html, body { background: var(--sp-bg) !important; }
-.gradio-container {
-  max-width: 1540px !important;
-  margin: 0 auto !important;
-  padding: 22px 24px 38px !important;
-  color: var(--sp-ink) !important;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif !important;
+html, body {
+  margin: 0;
   background:
-    radial-gradient(circle at 8% 4%, rgba(119, 200, 232, 0.32) 0, rgba(119, 200, 232, 0.0) 28%),
-    radial-gradient(circle at 92% 8%, rgba(200, 199, 244, 0.36) 0, rgba(200, 199, 244, 0.0) 30%),
-    radial-gradient(circle at 50% 96%, rgba(143, 216, 198, 0.22) 0, rgba(143, 216, 198, 0.0) 38%),
-    linear-gradient(180deg, #f8fbff 0%, #f5f7fb 48%, #f6f8fc 100%) !important;
+    radial-gradient(circle at 10% 10%, rgba(83, 178, 255, 0.16), transparent 30%),
+    radial-gradient(circle at 90% 12%, rgba(112, 234, 216, 0.16), transparent 24%),
+    radial-gradient(circle at 54% 100%, rgba(157, 140, 255, 0.12), transparent 28%),
+    linear-gradient(180deg, var(--sp-bg) 0%, var(--sp-bg-2) 48%, #fbfdff 100%) !important;
+  color: var(--sp-ink) !important;
 }
+.gradio-container {
+  min-height: 100vh !important;
+  padding: 12px !important;
+  color: var(--sp-ink) !important;
+  font-family: "Avenir Next", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif !important;
+  background: transparent !important;
+}
+.gradio-container *, .gradio-container *::before, .gradio-container *::after { box-sizing: border-box; }
+.gradio-container main.contain { max-width: 1680px !important; margin: 0 auto !important; }
 #sp-app-frame {
   position: relative;
-  border-radius: 36px;
-  padding: 1px;
-  margin-bottom: 18px;
-  background: linear-gradient(135deg, rgba(91, 141, 239, 0.26), rgba(255,255,255,0.65), rgba(119, 200, 232, 0.22));
-  box-shadow: var(--sp-shadow-float);
-  overflow: hidden;
+  margin: 0 auto 10px;
+  border-radius: 30px;
+  overflow: visible;
+  border: 1px solid rgba(255,255,255,0.78);
+  background: linear-gradient(135deg, rgba(255,255,255,0.84), rgba(244,249,255,0.64));
+  box-shadow: var(--sp-shadow-lg);
 }
 #sp-app-frame::before {
   content: "";
   position: absolute;
-  inset: 1px;
-  border-radius: 35px;
-  background: rgba(255, 255, 255, 0.48);
-  backdrop-filter: blur(20px);
+  inset: 0;
   pointer-events: none;
+  background:
+    radial-gradient(circle at top left, rgba(83, 178, 255, 0.12), transparent 34%),
+    radial-gradient(circle at bottom right, rgba(112, 234, 216, 0.10), transparent 26%);
 }
-#sp-app-inner { position: relative; border-radius: 35px; padding: 26px 28px 24px; overflow: hidden; }
-#sp-topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 24px; }
-.sp-brand { display: flex; align-items: center; gap: 14px; }
+#sp-app-inner { position: relative; padding: 14px; overflow: visible; }
+#sp-topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px 18px;
+  margin-bottom: 10px;
+}
+.sp-brand { display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; gap: 14px; }
 .sp-logo {
-  width: 48px; height: 48px; border-radius: 16px;
-  background: linear-gradient(135deg, #ffffff 0%, #eaf3ff 35%, #dff7ff 100%);
-  border: 1px solid rgba(255,255,255,0.86);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.95), 0 14px 28px rgba(91,141,239,0.18);
-  display: grid; place-items: center; color: var(--sp-primary); font-weight: 900; letter-spacing: -0.08em; font-size: 21px;
+  width: 50px; height: 50px; display: grid; place-items: center; border-radius: 16px;
+  background: linear-gradient(135deg, #58b4ff, #77f0d9); color: #13253d; font-size: 19px; font-weight: 900;
+  letter-spacing: -0.08em; box-shadow: 0 14px 28px rgba(88, 180, 255, 0.24);
 }
-.sp-brand h1 { margin: 0; font-size: 25px; letter-spacing: -0.04em; color: #142033; line-height: 1.05; }
-.sp-brand p { margin: 6px 0 0; color: var(--sp-muted); font-size: 13.5px; }
-.sp-status-strip { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 9px; }
+.sp-brand h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2.35rem); line-height: 1; letter-spacing: -0.05em; color: #233250; }
+.sp-brand p { margin: 6px 0 0; color: var(--sp-muted); line-height: 1.45; font-size: 0.9rem; }
+.sp-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+.sp-status-strip { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-start; }
 .sp-pill {
-  display: inline-flex; align-items: center; gap: 7px; padding: 9px 12px; border-radius: 999px;
-  color: #334155; background: rgba(255,255,255,0.70); border: 1px solid rgba(148,163,184,0.22);
-  box-shadow: 0 8px 20px rgba(31,41,55,0.045); font-size: 12.5px; font-weight: 650; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 8px 12px; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.9); background: rgba(255,255,255,0.56); color: #5a6f89;
+  box-shadow: 0 10px 20px rgba(122, 144, 184, 0.08); backdrop-filter: blur(14px);
+  font-size: 0.8rem;
 }
-.sp-pill-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--sp-success); box-shadow: 0 0 0 4px rgba(72,185,159,0.13); }
-#sp-hero-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr); gap: 20px; align-items: stretch; }
-.sp-hero-card, .sp-showcase-card {
-  position: relative; border-radius: 30px;
-  background: linear-gradient(145deg, rgba(255,255,255,0.80), rgba(255,255,255,0.54));
-  border: 1px solid rgba(255,255,255,0.74); box-shadow: var(--sp-shadow-card); overflow: hidden;
+.sp-mode-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(83, 178, 255, 0.15), rgba(112, 234, 216, 0.18));
+  border: 1px solid rgba(124, 196, 255, 0.42);
+  color: #2f5c86;
+  font-size: 0.8rem;
+  font-weight: 760;
 }
-.sp-hero-card { padding: 34px 36px; }
+.sp-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 8px 15px;
+  border-radius: 999px;
+  color: #183050;
+  background: linear-gradient(135deg, rgba(99, 183, 255, 0.94), rgba(116, 234, 216, 0.9));
+  box-shadow: 0 12px 24px rgba(91, 180, 255, 0.18);
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+.sp-pill-dot { width: 10px; height: 10px; border-radius: 999px; background: var(--sp-success); box-shadow: 0 0 0 5px rgba(89, 217, 173, 0.14); }
+#sp-hero-grid { display: grid; grid-template-columns: 1fr; gap: 0; }
+.sp-workflow-card {
+  position: relative;
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 24px;
+  border: 1px solid rgba(255,255,255,0.84);
+  background: linear-gradient(180deg, rgba(255,255,255,0.86), rgba(246,250,255,0.72));
+  box-shadow: var(--sp-shadow-md);
+}
+.sp-workflow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.sp-workflow-title {
+  color: #24324f;
+  font-size: 0.96rem;
+  font-weight: 780;
+  letter-spacing: -0.02em;
+}
+.sp-workflow-note {
+  color: var(--sp-muted);
+  font-size: 0.84rem;
+}
+.sp-workflow-rail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.sp-work-step {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  color: #6281a1;
+  background: rgba(255,255,255,0.82);
+  border: 1px solid rgba(198, 218, 241, 0.72);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.sp-work-step.is-active {
+  color: #1f4467;
+  background: linear-gradient(135deg, rgba(83, 178, 255, 0.16), rgba(112, 234, 216, 0.18));
+  border-color: rgba(117, 193, 255, 0.44);
+}
+.sp-work-arrow {
+  color: #91a3bb;
+  font-size: 0.92rem;
+  font-weight: 800;
+}
+.sp-hero-card, .sp-showcase-card, .sp-metric {
+  position: relative; overflow: hidden; border-radius: var(--sp-radius-lg); border: 1px solid rgba(255,255,255,0.82);
+  background: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(247,251,255,0.68)); box-shadow: var(--sp-shadow-md); backdrop-filter: blur(18px);
+}
+.sp-card, .sp-card-tight {
+  position: relative; overflow: visible; border-radius: var(--sp-radius-lg); border: 1px solid rgba(255,255,255,0.82);
+  background: linear-gradient(180deg, rgba(255,255,255,0.84), rgba(247,251,255,0.68)); box-shadow: var(--sp-shadow-md); backdrop-filter: blur(18px);
+}
+.sp-hero-card { padding: 24px 26px; min-height: 260px; display: flex; flex-direction: column; justify-content: space-between; }
 .sp-hero-card::after {
-  content: ""; position: absolute; width: 360px; height: 360px; right: -110px; top: -140px; border-radius: 999px;
-  background: radial-gradient(circle, rgba(91,141,239,0.18), rgba(119,200,232,0.04) 58%, transparent 70%);
+  content: ""; position: absolute; right: -120px; top: -140px; width: 360px; height: 360px; border-radius: 999px;
+  background: radial-gradient(circle, rgba(83,178,255,0.22), rgba(112,234,216,0.05) 56%, transparent 72%); pointer-events: none;
 }
 .sp-kicker {
-  display: inline-flex; align-items: center; padding: 7px 12px; border-radius: 999px;
-  background: rgba(91, 141, 239, 0.10); color: #3d69c6; font-weight: 760; font-size: 12px;
-  letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 16px;
+  display: inline-flex; align-items: center; min-height: 38px; padding: 0 14px; border-radius: 999px;
+  color: #4794db; background: rgba(83, 178, 255, 0.1); border: 1px solid rgba(83, 178, 255, 0.18);
+  font-size: 0.78rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em;
 }
-.sp-hero-card h2 { margin: 0; max-width: 740px; font-size: 42px; line-height: 1.08; letter-spacing: -0.06em; color: #101928; }
-.sp-hero-card h2 span { background: linear-gradient(110deg, #3d69c6, #2aa9c8 55%, #54b99f); -webkit-background-clip: text; color: transparent; }
-.sp-hero-card p { max-width: 850px; margin: 16px 0 0; font-size: 15.5px; line-height: 1.85; color: #5f6f87; }
-.sp-hero-actions { display: flex; flex-wrap: wrap; gap: 11px; margin-top: 22px; }
-.sp-soft-tag { padding: 9px 12px; border-radius: 14px; background: rgba(255,255,255,0.72); border: 1px solid rgba(148,163,184,0.20); color: #41516a; font-size: 13px; box-shadow: 0 8px 20px rgba(31,41,55,0.04); }
-.sp-showcase-card { padding: 24px; display: flex; flex-direction: column; justify-content: space-between; min-height: 280px; }
+.sp-hero-card h2 { margin: 14px 0 0; max-width: 12ch; font-size: clamp(2rem, 5vw, 3.9rem); line-height: 0.98; letter-spacing: -0.08em; color: #233250; }
+.sp-hero-card h2 span {
+  display: block; color: transparent; background: linear-gradient(120deg, #49a8ff, #71dfd1 58%, #8d7dff);
+  -webkit-background-clip: text; background-clip: text;
+}
+.sp-hero-card p { margin: 14px 0 0; max-width: 58ch; color: var(--sp-muted); font-size: 0.96rem; line-height: 1.72; }
+.sp-hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.sp-soft-tag {
+  min-height: 38px; display: inline-flex; align-items: center; padding: 0 13px; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.82); color: #617590; background: rgba(255,255,255,0.52); box-shadow: 0 8px 16px rgba(122, 144, 184, 0.06);
+  font-size: 0.84rem;
+}
+.sp-showcase-card { padding: 18px; min-height: 260px; display: grid; grid-template-rows: 132px auto auto; gap: 14px; }
 .sp-score-orbit {
-  height: 150px; border-radius: 28px;
-  background: radial-gradient(circle at 32% 30%, rgba(91,141,239,0.26) 0 12%, transparent 13%), radial-gradient(circle at 70% 62%, rgba(119,200,232,0.26) 0 16%, transparent 17%), linear-gradient(145deg, rgba(246,250,255,0.90), rgba(255,255,255,0.62));
-  border: 1px solid rgba(255,255,255,0.78); box-shadow: inset 0 1px 0 rgba(255,255,255,0.92), 0 18px 34px rgba(91,141,239,0.12); position: relative; overflow: hidden;
+  position: relative; min-height: 132px; border-radius: 22px;
+  background: radial-gradient(circle at 24% 28%, rgba(83, 178, 255, 0.24), transparent 0 18%), radial-gradient(circle at 70% 68%, rgba(112, 234, 216, 0.22), transparent 0 18%), linear-gradient(135deg, rgba(255,255,255,0.92), rgba(244,249,255,0.76));
+  border: 1px solid rgba(255,255,255,0.86); overflow: hidden;
 }
-.sp-score-orbit::after { content: "Top-K"; position: absolute; right: 20px; bottom: 18px; color: #3d69c6; font-weight: 850; font-size: 28px; letter-spacing: -0.04em; }
-.sp-showcase-card h3 { margin: 20px 0 6px; font-size: 18px; letter-spacing: -0.03em; color: #172033; }
-.sp-showcase-card p { margin: 0; color: var(--sp-muted); line-height: 1.7; font-size: 13.5px; }
-.sp-metric-row { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 14px; margin: 18px 0 22px; }
-.sp-metric {
-  border-radius: 22px; padding: 17px 18px; background: rgba(255,255,255,0.68); border: 1px solid rgba(255,255,255,0.76);
-  box-shadow: var(--sp-shadow-card); position: relative; overflow: hidden;
+.sp-score-orbit::before, .sp-score-orbit::after {
+  content: ""; position: absolute; inset: 18px; border-radius: 999px; border: 1px solid rgba(83, 178, 255, 0.16); animation: spOrbit 8s linear infinite;
 }
-.sp-metric::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; background: linear-gradient(90deg, rgba(91,141,239,0.68), rgba(119,200,232,0.26)); }
-.sp-metric .label { color: var(--sp-muted); font-size: 12px; margin-bottom: 9px; font-weight: 650; }
-.sp-metric .value { color: #172033; font-weight: 820; font-size: 17px; letter-spacing: -0.02em; }
-.sp-card, .sp-card-tight {
-  border-radius: var(--sp-radius-lg) !important; background: var(--sp-panel) !important; border: 1px solid rgba(255,255,255,0.78) !important;
-  box-shadow: var(--sp-shadow-card) !important; backdrop-filter: blur(18px) saturate(140%); position: relative; overflow: hidden;
-}
-.sp-card { padding: 20px !important; }
-.sp-card-tight { padding: 14px !important; }
-.sp-card::before, .sp-card-tight::before { content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit; background: linear-gradient(135deg, rgba(255,255,255,0.55), transparent 36%, rgba(119,200,232,0.07)); }
-.sp-section-title { position: relative; display: flex; align-items: center; gap: 10px; margin: 0 0 7px 0; color: #172033; font-weight: 830; font-size: 16px; letter-spacing: -0.02em; }
-.sp-section-title::before { content: ""; width: 9px; height: 9px; border-radius: 999px; background: linear-gradient(135deg, var(--sp-primary), var(--sp-primary-2)); box-shadow: 0 0 0 5px rgba(91,141,239,0.11); flex: none; }
-.sp-subtitle { position: relative; margin: 0 0 16px 19px; color: var(--sp-muted); font-size: 13px; line-height: 1.65; }
-.sp-mini-guide { display: grid; gap: 10px; margin-bottom: 15px; }
-.sp-guide-step { display: grid; grid-template-columns: 34px 1fr; gap: 10px; align-items: center; padding: 11px; border-radius: 16px; background: rgba(255,255,255,0.58); border: 1px solid rgba(148,163,184,0.17); }
-.sp-guide-num { width: 34px; height: 34px; border-radius: 12px; display: grid; place-items: center; background: linear-gradient(135deg, #eaf3ff, #e9fbff); color: #3d69c6; font-weight: 850; box-shadow: inset 0 1px 0 rgba(255,255,255,0.9); }
-.sp-guide-step b { display: block; font-size: 13.5px; color: #26364f; }
-.sp-guide-step span { display: block; margin-top: 3px; color: var(--sp-muted); font-size: 12px; }
-.tabs, .tabitem, .tab-nav, .tabitem > div { border-radius: 22px !important; }
-.tab-nav button { border-radius: 999px !important; padding: 10px 17px !important; font-weight: 720 !important; color: #5c6b82 !important; }
-.tab-nav button.selected { background: rgba(255,255,255,0.80) !important; color: #2f5fb8 !important; box-shadow: 0 10px 26px rgba(91,141,239,0.14) !important; }
-button, .gradio-button { border-radius: 15px !important; font-weight: 760 !important; letter-spacing: -0.01em !important; min-height: 42px !important; transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease !important; }
-button:hover, .gradio-button:hover { transform: translateY(-1px); filter: brightness(1.01); }
-button.primary, .gradio-button.primary { background: linear-gradient(135deg, #5b8def 0%, #65bfe0 100%) !important; border: 0 !important; color: #ffffff !important; box-shadow: 0 14px 28px rgba(91, 141, 239, 0.25) !important; }
-.sp-blue button, .sp-green button { border: 0 !important; color: white !important; box-shadow: 0 14px 30px rgba(91, 141, 239, 0.22) !important; }
-.sp-blue button { background: linear-gradient(135deg, #5b8def, #77c8e8) !important; }
-.sp-green button { background: linear-gradient(135deg, #48b99f, #77c8e8) !important; }
-.sp-danger button { background: rgba(255,255,255,0.74) !important; color: #c45858 !important; border: 1px solid rgba(224,122,122,0.26) !important; box-shadow: 0 10px 22px rgba(224,122,122,0.08) !important; }
-textarea, input, select, .wrap, .dataframe, .table-wrap { border-radius: 15px !important; }
-label, .label-wrap span { color: #42526a !important; font-weight: 650 !important; }
-input, textarea { background: rgba(255,255,255,0.78) !important; border-color: rgba(148,163,184,0.24) !important; }
-.block, .form, .form > div { border-radius: var(--sp-radius-md) !important; }
-.image-container, .gallery, .gallery > div, .file-preview, .download-button { border-radius: 18px !important; }
-.dataframe table { font-size: 13px !important; }
-.dataframe th { background: rgba(239,246,255,0.78) !important; color: #334155 !important; font-weight: 750 !important; }
-.dataframe td { color: #475569 !important; }
-.accordion { border-radius: 16px !important; border-color: rgba(148,163,184,0.18) !important; background: rgba(255,255,255,0.44) !important; }
-#canvas-shell iframe { border-radius: 24px !important; box-shadow: 0 22px 56px rgba(31, 41, 55, 0.12) !important; }
-.sp-file-row .file-preview, .sp-file-row .download-button { border-radius: 18px !important; }
-
-/* Comfort display refresh: bigger, airier, easier to present */
-.gradio-container {
-  max-width: 1680px !important;
-  padding: 30px 34px 52px !important;
-}
-#sp-app-inner {
-  padding: 34px 38px 34px !important;
-}
-#sp-topbar {
-  margin-bottom: 30px !important;
-}
-.sp-logo {
-  width: 58px !important;
-  height: 58px !important;
-  border-radius: 20px !important;
-  font-size: 25px !important;
-}
-.sp-brand h1 {
-  font-size: 32px !important;
-  letter-spacing: -0.03em !important;
-}
-.sp-brand p {
-  font-size: 15px !important;
-}
-#sp-hero-grid {
-  grid-template-columns: minmax(0, 1.55fr) minmax(360px, 0.45fr) !important;
-  gap: 26px !important;
-}
-.sp-hero-card {
-  padding: 44px 48px !important;
-}
-.sp-hero-card h2 {
-  font-size: 50px !important;
-  line-height: 1.06 !important;
-  letter-spacing: -0.045em !important;
-}
-.sp-hero-card p {
-  font-size: 17px !important;
-  line-height: 1.9 !important;
-}
-.sp-showcase-card {
-  min-height: 330px !important;
-}
-.sp-metric-row {
-  gap: 18px !important;
-  margin: 24px 0 28px !important;
-}
-.sp-metric {
-  padding: 22px 24px !important;
-}
-.sp-metric .label {
-  font-size: 13px !important;
-}
-.sp-metric .value {
-  font-size: 20px !important;
-}
-.sp-card, .sp-card-tight {
-  padding: 28px !important;
-  border-radius: 26px !important;
-}
-.sp-card-tight {
-  padding: 24px !important;
-}
-.sp-section-title {
-  font-size: 20px !important;
-  margin-bottom: 10px !important;
-}
-.sp-subtitle {
-  font-size: 14.5px !important;
-  line-height: 1.75 !important;
-  margin-bottom: 20px !important;
-}
-.sp-guide-step {
-  padding: 15px !important;
-  grid-template-columns: 42px 1fr !important;
-}
-.sp-guide-num {
-  width: 42px !important;
-  height: 42px !important;
-}
-.sp-guide-step b {
-  font-size: 15px !important;
-}
-.sp-guide-step span {
-  font-size: 13px !important;
-}
-.tab-nav button {
-  min-height: 48px !important;
-  padding: 12px 22px !important;
-  font-size: 15px !important;
-}
-button, .gradio-button {
-  min-height: 52px !important;
-  font-size: 15px !important;
-}
-label, .label-wrap span {
-  font-size: 14px !important;
-}
-input, textarea {
-  min-height: 46px !important;
-  font-size: 14.5px !important;
-}
-.sp-preview-card {
-  min-height: 390px !important;
-}
-.sp-preview-card .image-container,
-.sp-preview-card [data-testid="image"],
-.sp-preview-card img {
-  min-height: 280px !important;
-}
-#canvas-shell iframe {
-  border-radius: 28px !important;
-  min-height: 620px;
-}
-.dataframe table {
-  font-size: 14px !important;
-}
-
-@media (max-width: 1120px) {
-  #sp-hero-grid { grid-template-columns: 1fr; }
-  .sp-metric-row { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
-  #sp-topbar { align-items: flex-start; flex-direction: column; }
-  .sp-status-strip { justify-content: flex-start; }
-}
-@media (max-width: 680px) {
-  .gradio-container { padding: 14px !important; }
-  #sp-app-inner { padding: 18px; }
-  .sp-hero-card { padding: 24px; }
-  .sp-hero-card h2 { font-size: 30px; }
-  .sp-metric-row { grid-template-columns: 1fr; }
-  .sp-card, .sp-card-tight { padding: 20px !important; }
-}
-
-/* Workspace style inspired by LibCom: restrained, tool-first, thin borders. */
-:root {
-  --sp-bg: #f7f8fb;
-  --sp-panel: #ffffff;
-  --sp-ink: #1f2937;
-  --sp-muted: #8a94a6;
-  --sp-primary: #2563eb;
-  --sp-primary-2: #2563eb;
-  --sp-border: #e6e9ef;
-  --sp-shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04);
-  --sp-shadow-float: 0 8px 24px rgba(15, 23, 42, 0.06);
-  --sp-radius-sm: 6px;
-  --sp-radius-md: 8px;
-  --sp-radius-lg: 10px;
-}
-html, body { background: var(--sp-bg) !important; }
-.gradio-container {
-  max-width: 100% !important;
-  padding: 0 !important;
-  background: #f7f8fb !important;
-}
-.gradio-container main,
-.gradio-container .contain,
-.gradio-container .tabs,
-.gradio-container .tabitem {
-  max-width: none !important;
-}
-.gradio-container main.contain {
-  width: calc(100vw - 56px) !important;
-  max-width: 1920px !important;
-  margin: 0 auto !important;
-}
-#sp-app-frame {
-  max-width: 1680px;
-  margin: 0 auto;
-  padding: 0 18px 22px 92px;
-  border: 0;
-  border-radius: 0;
-  background: transparent !important;
-  box-shadow: none !important;
-}
-#sp-app-frame::before { display: none !important; }
-#sp-app-inner { padding: 0 !important; }
-#sp-topbar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  min-height: 78px;
-  margin: 0 -18px 16px -92px !important;
-  padding: 16px 24px 16px 92px;
-  background: rgba(247,248,251,0.96);
-  border-bottom: 1px solid var(--sp-border);
-  backdrop-filter: blur(12px);
-}
-.sp-brand {
-  position: fixed;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  z-index: 30;
-  width: 72px;
-  padding: 26px 10px;
-  display: flex !important;
-  flex-direction: column;
-  align-items: center;
-  gap: 16px;
-  background: #ffffff;
-  border-right: 1px solid var(--sp-border);
-  box-shadow: 1px 0 0 rgba(15,23,42,0.02);
-}
-.sp-logo {
-  width: 38px !important;
-  height: 38px !important;
-  border-radius: 8px !important;
+.sp-score-orbit::after { inset: 36px; animation-duration: 12s; animation-direction: reverse; }
+.sp-showcase-card h3 { margin: 0; font-size: 1.08rem; line-height: 1.35; color: #24324f; }
+.sp-showcase-card p { margin: 0; color: var(--sp-muted); line-height: 1.72; font-size: 0.92rem; }
+.sp-stat-grid {
   display: grid;
-  place-items: center;
-  background: #111827 !important;
-  color: #ffffff !important;
-  font-weight: 800;
-  box-shadow: none !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
-.sp-brand h1 {
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
-  letter-spacing: 0.12em !important;
-  color: #111827 !important;
-  font-weight: 760;
-  font-size: 14px !important;
-  line-height: 1.35;
-  margin: 0 !important;
+.sp-stat {
+  border-radius: 18px;
+  padding: 12px 14px;
+  background: rgba(255,255,255,0.62);
+  border: 1px solid rgba(255,255,255,0.82);
 }
-.sp-brand p { display: none !important; }
-.sp-pill {
-  border-radius: 999px;
-  background: #ffffff !important;
-  border: 1px solid var(--sp-border) !important;
-  box-shadow: none !important;
-  color: #5f6b7a !important;
+.sp-stat span {
+  display: block;
+  font-size: 0.74rem;
+  color: var(--sp-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
-.sp-pill-dot { background: #22c55e !important; box-shadow: none !important; }
-#sp-hero-grid { display: none !important; }
-.sp-metric-row {
-  margin: 0 0 14px 92px !important;
-  grid-template-columns: repeat(4, minmax(160px, 1fr));
-  gap: 10px !important;
+.sp-stat strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.98rem;
+  color: #24324f;
 }
-.sp-metric {
-  border-radius: 8px !important;
-  padding: 13px 14px !important;
-  background: #ffffff !important;
-  border: 1px solid var(--sp-border) !important;
-  box-shadow: var(--sp-shadow-card) !important;
+.sp-metric-row { display: none !important; }
+.sp-metric { border-radius: 24px; padding: 18px; }
+.sp-metric::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; background: linear-gradient(90deg, rgba(75,168,255,0.85), rgba(103,228,210,0.48), transparent 78%);
 }
-.sp-metric::before { display: none !important; }
-.sp-metric .label { color: #8a94a6 !important; font-size: 12px !important; font-weight: 600 !important; }
-.sp-metric .value { color: #1f2937 !important; font-size: 15px !important; font-weight: 760 !important; }
-.sp-card, .sp-card-tight {
-  border-radius: 8px !important;
-  background: #ffffff !important;
-  border: 1px solid var(--sp-border) !important;
-  box-shadow: var(--sp-shadow-card) !important;
-  backdrop-filter: none !important;
-  overflow: hidden;
-}
-.sp-card::before, .sp-card-tight::before { display: none !important; }
+.sp-metric .label { color: var(--sp-muted); font-size: 0.84rem; margin-bottom: 10px; }
+.sp-metric .value { font-size: 1.06rem; font-weight: 760; line-height: 1.35; color: #273654; }
+.sp-card, .sp-card-tight { border-radius: 28px !important; }
 .sp-card { padding: 16px !important; }
-.sp-card-tight { padding: 14px !important; }
-.sp-section-title {
-  color: #1f2937 !important;
-  font-size: 17px !important;
-  font-weight: 760 !important;
-  margin: 0 0 6px 0 !important;
-  letter-spacing: 0 !important;
-}
+.sp-card-tight { padding: 12px !important; }
+.sp-section-title { display: flex; align-items: center; gap: 10px; margin: 0 0 8px 0; font-size: 1rem; font-weight: 780; color: #24324f; }
 .sp-section-title::before {
-  width: 3px !important;
-  height: 16px !important;
-  border-radius: 3px !important;
-  background: #2563eb !important;
-  box-shadow: none !important;
+  content: ""; width: 11px; height: 11px; border-radius: 999px; background: linear-gradient(135deg, var(--sp-primary), var(--sp-primary-2)); box-shadow: 0 0 14px rgba(75, 168, 255, 0.24);
 }
-.sp-subtitle {
-  margin: 0 0 14px 13px !important;
-  color: #8a94a6 !important;
-  font-size: 13px !important;
-  line-height: 1.6 !important;
-}
-.sp-guide-step { border-radius: 8px !important; background: #f8fafc !important; border: 1px solid #edf0f5 !important; }
-.sp-guide-num { border-radius: 6px !important; background: #eef4ff !important; color: #2563eb !important; box-shadow: none !important; }
-.tabs, .tabitem, .tabitem > div { border-radius: 0 !important; }
+.sp-subtitle { margin: 0 0 14px 22px; color: var(--sp-muted); font-size: 0.92rem; line-height: 1.7; }
+.tabs, .tabitem, .tab-nav, .tabitem > div { border-radius: 24px !important; }
 .tab-nav {
-  gap: 0 !important;
-  border-bottom: 1px solid var(--sp-border) !important;
-  background: #ffffff !important;
-  padding: 0 10px !important;
+  gap: 8px !important; margin: 4px 0 14px !important; padding: 6px !important; background: rgba(255,255,255,0.54) !important;
+  border: 1px solid rgba(255,255,255,0.88) !important; box-shadow: 0 10px 20px rgba(122, 144, 184, 0.08);
 }
 .tab-nav button {
-  border-radius: 0 !important;
-  padding: 13px 16px !important;
-  color: #7b8494 !important;
-  background: transparent !important;
-  box-shadow: none !important;
-  border-bottom: 2px solid transparent !important;
+  min-height: 48px !important; border-radius: 999px !important; padding: 10px 16px !important; color: #5d6f8a !important;
+  background: transparent !important; transition: transform var(--sp-ease), background var(--sp-ease), box-shadow var(--sp-ease), color var(--sp-ease) !important;
 }
+.tab-nav button:hover { transform: translateY(-1px); color: #27405f !important; background: rgba(255,255,255,0.62) !important; }
 .tab-nav button.selected {
-  color: #111827 !important;
-  background: transparent !important;
-  border-bottom-color: #2563eb !important;
-  box-shadow: none !important;
+  color: #183050 !important; background: linear-gradient(135deg, rgba(75,168,255,0.28), rgba(103,228,210,0.24)) !important; box-shadow: 0 10px 24px rgba(86, 154, 231, 0.16) !important;
 }
 button, .gradio-button {
-  border-radius: 6px !important;
-  min-height: 38px !important;
-  font-weight: 650 !important;
-  letter-spacing: 0 !important;
-  box-shadow: none !important;
-  transform: none !important;
+  min-height: 48px !important; border-radius: 16px !important; font-weight: 760 !important; letter-spacing: -0.01em !important;
+  transition: transform var(--sp-ease), box-shadow var(--sp-ease), background var(--sp-ease), opacity var(--sp-ease) !important;
+}
+button:hover, .gradio-button:hover { transform: translate3d(0, -2px, 0); }
+button:active, .gradio-button:active { transform: translate3d(0, 1px, 0) scale(0.985); }
+button:focus-visible, .gradio-button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid rgba(75, 168, 255, 0.75) !important; outline-offset: 2px !important;
 }
 button.primary, .gradio-button.primary, .sp-blue button, .sp-green button {
-  background: #111827 !important;
-  color: #ffffff !important;
-  border: 1px solid #111827 !important;
+  color: #16314f !important; border: 0 !important; background: linear-gradient(135deg, #63b7ff, #74ead8) !important; box-shadow: 0 14px 28px rgba(91, 180, 255, 0.2) !important;
+}
+.sp-danger button { color: #fff !important; background: linear-gradient(135deg, rgba(255,127,150,0.78), rgba(255,154,168,0.7)) !important; border: 0 !important; }
+input, textarea, select, .wrap, .dataframe, .table-wrap, .image-container, .gallery, .gallery > div, .file-preview, .download-button, .accordion { border-radius: 18px !important; }
+input, textarea, select { min-height: 48px !important; color: #20314d !important; background: rgba(255,255,255,0.8) !important; border: 1px solid rgba(160, 196, 235, 0.4) !important; }
+label, .label-wrap span { color: #4f6484 !important; font-weight: 680 !important; }
+.dataframe, .table-wrap, .gallery, .file-preview, .accordion { background: rgba(255,255,255,0.66) !important; border: 1px solid rgba(255,255,255,0.88) !important; }
+.dataframe th { background: linear-gradient(180deg, rgba(91, 180, 255, 0.14), rgba(103, 228, 210, 0.08)) !important; color: #28405f !important; font-weight: 760 !important; }
+.dataframe td { color: #4d6280 !important; }
+.dataframe table { border-collapse: separate !important; border-spacing: 0 8px !important; }
+.dataframe tbody tr { background: rgba(255,255,255,0.9) !important; box-shadow: 0 8px 18px rgba(122, 144, 184, 0.08) !important; }
+.dataframe tbody td:first-child { border-radius: 12px 0 0 12px !important; }
+.dataframe tbody td:last-child { border-radius: 0 12px 12px 0 !important; }
+.gradio-container .fullscreen,
+.gradio-container [data-fullscreen="true"] {
+  position: fixed !important;
+  inset: 24px !important;
+  width: auto !important;
+  height: auto !important;
+  max-width: calc(100vw - 48px) !important;
+  max-height: calc(100vh - 48px) !important;
+  margin: 0 !important;
+  padding: 18px !important;
+  overflow: auto !important;
+  z-index: 9999 !important;
+  background: rgba(247, 251, 255, 0.96) !important;
+  border: 1px solid rgba(210, 224, 241, 0.95) !important;
+  border-radius: 24px !important;
+  box-shadow: 0 28px 60px rgba(73, 96, 140, 0.22) !important;
+  backdrop-filter: blur(18px) !important;
+}
+.gradio-container .fullscreen::before,
+.gradio-container [data-fullscreen="true"]::before {
+  content: "" !important;
+  position: fixed !important;
+  inset: 0 !important;
+  background: rgba(239, 246, 255, 0.72) !important;
+  z-index: -1 !important;
+}
+.gradio-container .fullscreen .image-container,
+.gradio-container .fullscreen [data-testid="image"],
+.gradio-container .fullscreen img,
+.gradio-container [data-fullscreen="true"] .image-container,
+.gradio-container [data-fullscreen="true"] [data-testid="image"],
+.gradio-container [data-fullscreen="true"] img {
+  min-height: unset !important;
+  height: auto !important;
+  max-height: 82vh !important;
+  max-width: 100% !important;
+  object-fit: contain !important;
+  border-radius: 18px !important;
   box-shadow: none !important;
 }
-.sp-danger button {
+.gradio-container .fullscreen .dataframe,
+.gradio-container .fullscreen .table-wrap,
+.gradio-container [data-fullscreen="true"] .dataframe,
+.gradio-container [data-fullscreen="true"] .table-wrap {
   background: #ffffff !important;
-  color: #b42318 !important;
-  border: 1px solid #f1b5ad !important;
+  border: 1px solid rgba(210, 224, 241, 0.9) !important;
+  box-shadow: none !important;
+  width: 100% !important;
+}
+.gradio-container .fullscreen .dataframe table,
+.gradio-container [data-fullscreen="true"] .dataframe table {
+  border-spacing: 0 !important;
+  border-collapse: collapse !important;
+}
+.gradio-container .fullscreen .dataframe tbody tr,
+.gradio-container [data-fullscreen="true"] .dataframe tbody tr {
+  background: transparent !important;
   box-shadow: none !important;
 }
-textarea, input, select, .wrap, .dataframe, .table-wrap, .image-container, .gallery, .gallery > div, .file-preview, .download-button, .accordion {
-  border-radius: 8px !important;
+.gradio-container .fullscreen .dataframe tbody td:first-child,
+.gradio-container .fullscreen .dataframe tbody td:last-child,
+.gradio-container [data-fullscreen="true"] .dataframe tbody td:first-child,
+.gradio-container [data-fullscreen="true"] .dataframe tbody td:last-child {
+  border-radius: 0 !important;
 }
-input, textarea { background: #ffffff !important; border-color: var(--sp-border) !important; }
-.dataframe th { background: #f8fafc !important; color: #334155 !important; }
-#canvas-shell iframe {
-  border-radius: 8px !important;
-  border: 1px solid var(--sp-border) !important;
+.gradio-container .fullscreen button,
+.gradio-container [data-fullscreen="true"] button {
   box-shadow: none !important;
 }
-@media (max-width: 900px) {
-  #sp-app-frame { padding-left: 18px; }
-  .sp-brand { display: none !important; }
-  #sp-topbar { margin-left: -18px !important; padding-left: 24px; }
-  .sp-metric-row { margin-left: 0 !important; }
+#canvas-shell {
+  padding: 12px;
+  border-radius: 30px;
+  background: linear-gradient(145deg, rgba(86,175,255,0.08), rgba(112,234,216,0.06), rgba(255,255,255,0.64));
+  border: 1px solid rgba(255,255,255,0.92);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.82), 0 18px 38px rgba(108, 136, 190, 0.12);
 }
-
-#sp-topbar,
-.sp-metric-row {
-  display: none !important;
-}
-#sp-app-frame {
-  max-width: 1920px !important;
-  padding: 18px 28px 28px !important;
-}
-.sp-brand { display: none !important; }
-.tab-nav {
-  margin-top: 0 !important;
-}
-.sp-card { padding: 20px !important; }
-.sp-card-tight { padding: 18px !important; }
-.sp-section-title {
-  font-size: 18px !important;
-  margin-bottom: 12px !important;
-}
-.sp-subtitle {
-  display: none !important;
-  margin-bottom: 8px !important;
-  font-size: 12px !important;
-  line-height: 1.45 !important;
-}
-button, .gradio-button {
-  min-height: 44px !important;
-  font-size: 14px !important;
-}
-.tab-nav button {
-  min-height: 44px !important;
-  padding: 10px 18px !important;
-  font-size: 14px !important;
-}
-.sp-preview-card {
-  min-height: 330px !important;
-}
-.sp-preview-card .image-container,
-.sp-preview-card [data-testid="image"],
-.sp-preview-card img {
-  min-height: 235px !important;
-}
-#canvas-shell iframe {
-  min-height: 520px !important;
-  max-height: 680px !important;
-}
-#workspace-main-row {
-  flex-wrap: nowrap !important;
-  gap: 20px !important;
-  align-items: flex-start !important;
-  overflow-x: auto !important;
-  padding-bottom: 8px !important;
-}
-#sp-left-panel {
-  flex: 0 1 clamp(400px, 22vw, 480px) !important;
-  min-width: 400px !important;
-  max-width: 480px !important;
-}
-#sp-center-panel {
-  flex: 1 1 auto !important;
-  min-width: 620px !important;
-}
-#sp-right-panel {
-  flex: 0 1 clamp(360px, 18vw, 420px) !important;
-  min-width: 360px !important;
-  max-width: 420px !important;
-}
+#canvas-shell iframe { width: 100%; min-height: 500px; border-radius: 28px !important; border: 1px solid rgba(255,255,255,0.95) !important; box-shadow: 0 24px 48px rgba(108, 136, 190, 0.18), 0 0 0 8px rgba(83,178,255,0.06) !important; }
+.sp-preview-card .image-container, .sp-preview-card [data-testid="image"], .sp-preview-card img { min-height: 210px !important; }
+#workspace-main-row { display: grid !important; grid-template-columns: 1fr; gap: 16px !important; }
+#sp-left-panel, #sp-center-panel, #sp-right-panel { min-width: 0 !important; }
 #sp-left-panel .sp-card {
-  min-height: calc(100vh - 150px) !important;
-  max-height: none !important;
-  overflow-y: visible !important;
+  background: linear-gradient(180deg, rgba(255,255,255,0.76), rgba(249,252,255,0.64)) !important;
+}
+#sp-left-panel .image-container,
+#sp-left-panel .gallery,
+#sp-left-panel .gallery > div {
+  border-color: rgba(255,255,255,0.7) !important;
+  box-shadow: none !important;
 }
 #sp-right-panel .sp-card {
-  min-height: calc(100vh - 150px) !important;
-  max-height: none !important;
-  overflow-y: visible !important;
-  overflow-x: visible !important;
+  position: sticky;
+  top: 16px;
+  z-index: 1;
+  background: linear-gradient(180deg, rgba(251,253,255,0.92), rgba(244,249,255,0.76)) !important;
 }
-#sp-right-panel .accordion,
-#sp-right-panel .form,
-#sp-right-panel .block,
-#sp-right-panel .wrap {
-  max-width: 100% !important;
-  overflow: visible !important;
-  box-sizing: border-box !important;
+#sp-right-panel .sp-subtitle { margin-bottom: 12px; }
+#sp-right-panel .sp-param-title {
+  margin: 14px 0 8px;
+  color: #5a708d;
+  font-size: 0.86rem;
+  font-weight: 730;
 }
-#sp-right-panel .form,
-#sp-right-panel .block {
-  min-height: auto !important;
-  height: auto !important;
+#sp-right-panel .sp-flat-select {
+  margin-bottom: 12px !important;
 }
-#sp-right-panel input {
-  min-height: 42px !important;
+#sp-right-panel .sp-flat-select > .wrap {
+  padding: 10px 12px !important;
+  border-radius: 20px !important;
+  background: rgba(255,255,255,0.94) !important;
+  border: 1px solid rgba(205, 220, 240, 0.92) !important;
+  box-shadow: 0 10px 24px rgba(121, 145, 183, 0.08) !important;
 }
-#sp-right-panel input[type="number"] {
+#sp-right-panel .sp-param-block {
+  margin: 12px 0 16px !important;
+  padding: 0 !important;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+#sp-right-panel .sp-param-row {
+  margin: 0 0 8px !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+}
+#sp-right-panel .sp-param-name {
+  color: #435a77;
+  font-size: 0.88rem;
+  font-weight: 730;
+  line-height: 1.35;
+}
+#sp-right-panel .sp-value-badge {
+  max-width: 84px !important;
+  min-width: 72px !important;
+}
+#sp-right-panel .sp-value-badge input,
+#sp-right-panel .sp-value-badge textarea {
+  height: 34px !important;
+  min-height: 34px !important;
+  padding: 6px 10px !important;
+  text-align: center !important;
+  border-radius: 999px !important;
+  border: 1px solid rgba(191, 212, 238, 0.92) !important;
+  background: linear-gradient(180deg, rgba(250,253,255,0.96), rgba(239,247,255,0.94)) !important;
+  color: #2f5f88 !important;
+  font-size: 0.82rem !important;
+  font-weight: 760 !important;
+  box-shadow: none !important;
+}
+#sp-right-panel .sp-flat-slider {
+  margin: 0 !important;
+}
+#sp-right-panel .sp-flat-slider > .wrap {
+  padding: 2px 0 0 !important;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+#sp-right-panel .sp-flat-slider .block-label,
+#sp-right-panel .sp-flat-slider .label-wrap,
+#sp-right-panel .sp-flat-slider label,
+#sp-right-panel .sp-flat-slider [data-testid="number-input"],
+#sp-right-panel .sp-flat-slider input[type="number"],
+#sp-right-panel .sp-flat-slider input[type="text"] {
   display: none !important;
 }
-#sp-right-panel input[type="checkbox"] {
-  appearance: auto !important;
-  -webkit-appearance: checkbox !important;
-  accent-color: #2563eb !important;
-  opacity: 1 !important;
-  pointer-events: auto !important;
+#sp-right-panel .sp-flat-slider .wrap > div:last-child,
+#sp-right-panel .sp-flat-slider .wrap > :last-child {
+  min-width: 0 !important;
 }
-#sp-right-panel label,
-#sp-right-panel .wrap {
-  min-height: 52px !important;
+#sp-right-panel .sp-flat-slider input[type=\"range\"],
+#sp-right-panel .sp-flat-slider .gradio-slider input[type=\"range\"] {
+  width: 100% !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  accent-color: #49b0ff !important;
+  height: 12px !important;
+  border-radius: 999px !important;
+  background: linear-gradient(90deg, rgba(216, 228, 242, 0.95), rgba(226, 235, 247, 0.92)) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.92),
+    inset 0 0 0 1px rgba(194, 212, 236, 0.62),
+    0 8px 18px rgba(123, 147, 186, 0.08) !important;
+  transition: transform var(--sp-ease), box-shadow var(--sp-ease), height var(--sp-ease) !important;
 }
-#sp-right-panel label,
-#sp-right-panel .label-wrap,
-#sp-right-panel .prose {
-  white-space: normal !important;
-  overflow-wrap: anywhere !important;
+#sp-right-panel .sp-flat-slider input[type=\"range\"]:hover,
+#sp-right-panel .sp-flat-slider .gradio-slider input[type=\"range\"]:hover {
+  height: 14px !important;
+  transform: translateY(-1px) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.95),
+    inset 0 0 0 1px rgba(154, 203, 255, 0.78),
+    0 12px 22px rgba(95, 163, 240, 0.12) !important;
+}
+#sp-right-panel .sp-flat-slider input[type=\"range\"]::-webkit-slider-runnable-track,
+#sp-right-panel .sp-flat-slider .gradio-slider input[type=\"range\"]::-webkit-slider-runnable-track {
+  height: 12px !important;
+  border-radius: 999px !important;
+  background: transparent !important;
+}
+#sp-right-panel .sp-flat-slider input[type=\"range\"]::-moz-range-track,
+#sp-right-panel .sp-flat-slider .gradio-slider input[type=\"range\"]::-moz-range-track {
+  height: 12px !important;
+  border-radius: 999px !important;
+  background: transparent !important;
+  border: 0 !important;
+}
+#sp-right-panel .sp-flat-slider input[type=\"range\"]::-webkit-slider-thumb,
+#sp-right-panel .sp-flat-slider .gradio-slider input[type=\"range\"]::-webkit-slider-thumb {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  width: 24px !important;
+  height: 24px !important;
+  margin-top: -6px !important;
+  border-radius: 999px !important;
+  background:
+    radial-gradient(circle at 32% 30%, rgba(255,255,255,0.98), rgba(255,255,255,0.8) 52%, rgba(207, 230, 255, 0.88) 100%) !important;
+  border: 1px solid rgba(191, 214, 242, 0.96) !important;
+  box-shadow:
+    0 10px 18px rgba(108, 138, 180, 0.18),
+    0 0 0 6px rgba(94, 186, 255, 0.10) !important;
+  transition: transform var(--sp-ease), box-shadow var(--sp-ease) !important;
+}
+#sp-right-panel .sp-flat-slider input[type=\"range\"]:hover::-webkit-slider-thumb,
+#sp-right-panel .sp-flat-slider .gradio-slider input[type=\"range\"]:hover::-webkit-slider-thumb {
+  transform: scale(1.08) !important;
+  box-shadow:
+    0 12px 22px rgba(108, 138, 180, 0.22),
+    0 0 0 9px rgba(94, 186, 255, 0.12) !important;
+}
+#sp-right-panel .sp-flat-slider input[type=\"range\"]:active::-webkit-slider-thumb,
+#sp-right-panel .sp-flat-slider .gradio-slider input[type=\"range\"]:active::-webkit-slider-thumb {
+  transform: scale(1.14) !important;
+}
+#sp-right-panel .sp-flat-slider input[type=\"range\"]::-moz-range-thumb,
+#sp-right-panel .sp-flat-slider .gradio-slider input[type=\"range\"]::-moz-range-thumb {
+  width: 24px !important;
+  height: 24px !important;
+  border: 1px solid rgba(191, 214, 242, 0.96) !important;
+  border-radius: 999px !important;
+  background:
+    radial-gradient(circle at 32% 30%, rgba(255,255,255,0.98), rgba(255,255,255,0.8) 52%, rgba(207, 230, 255, 0.88) 100%) !important;
+  box-shadow:
+    0 10px 18px rgba(108, 138, 180, 0.18),
+    0 0 0 6px rgba(94, 186, 255, 0.10) !important;
+}
+#sp-right-panel .sp-switch-row {
+  margin: 10px 0 !important;
+  padding: 10px 0 !important;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+}
+#sp-right-panel .sp-single-switch {
+  min-width: 68px !important;
+}
+#sp-right-panel .sp-single-switch > .wrap {
+  padding: 0 !important;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+#sp-right-panel .sp-single-switch label {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 0 !important;
+  min-width: 68px !important;
+  padding: 0 !important;
+}
+#sp-right-panel .sp-single-switch input[type="checkbox"] {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  width: 52px !important;
+  height: 30px !important;
+  border-radius: 999px !important;
+  background: rgba(211, 223, 239, 0.96) !important;
+  border: 1px solid rgba(192, 209, 233, 0.92) !important;
+  position: relative !important;
+  cursor: pointer !important;
+  box-shadow: inset 0 1px 2px rgba(111, 138, 178, 0.08) !important;
+}
+#sp-right-panel .sp-single-switch input[type="checkbox"]::before {
+  content: "" !important;
+  position: absolute !important;
+  top: 3px !important;
+  left: 3px !important;
+  width: 22px !important;
+  height: 22px !important;
+  border-radius: 999px !important;
+  background: #ffffff !important;
+  box-shadow: 0 4px 10px rgba(113, 136, 172, 0.18) !important;
+  transition: transform var(--sp-ease), background var(--sp-ease) !important;
+}
+#sp-right-panel .sp-single-switch input[type="checkbox"]:checked {
+  background: linear-gradient(135deg, rgba(86,181,255,0.96), rgba(112,234,216,0.96)) !important;
+  border-color: rgba(99, 183, 255, 0.84) !important;
+}
+#sp-right-panel .sp-single-switch input[type="checkbox"]:checked::before {
+  transform: translateX(22px) !important;
+}
+#sp-right-panel .sp-chip-group {
+  margin: 8px 0 14px !important;
+}
+#sp-right-panel .sp-chip-group > .wrap {
+  padding: 10px !important;
+  border-radius: 20px !important;
+  background: rgba(255,255,255,0.92) !important;
+  border: 1px solid rgba(205, 220, 240, 0.92) !important;
+  box-shadow: 0 10px 24px rgba(121, 145, 183, 0.08) !important;
+}
+#sp-right-panel .sp-chip-group .wrap label,
+#sp-right-panel .sp-chip-group .checkbox-group label {
+  margin: 0 8px 8px 0 !important;
+  padding: 8px 14px !important;
+  border-radius: 999px !important;
+  border: 1px solid rgba(198, 217, 240, 0.92) !important;
+  background: rgba(246,250,255,0.94) !important;
+  color: #507095 !important;
+  font-size: 0.84rem !important;
+  font-weight: 700 !important;
+  box-shadow: none !important;
+}
+#sp-right-panel .sp-chip-group input:checked + span,
+#sp-right-panel .sp-chip-group label:has(input:checked) {
+  color: #1f4467 !important;
+  background: linear-gradient(135deg, rgba(83, 178, 255, 0.16), rgba(112, 234, 216, 0.18)) !important;
+  border-color: rgba(117, 193, 255, 0.44) !important;
+}
+#sp-right-panel .sp-advanced-accordion {
+  margin-top: 12px !important;
+  border-radius: 22px !important;
+  border: 1px solid rgba(206, 221, 240, 0.92) !important;
+  background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(247,251,255,0.8)) !important;
+  box-shadow: none !important;
+}
+#sp-right-panel .sp-advanced-accordion .label-wrap,
+#sp-right-panel .sp-advanced-accordion .accordion-header,
+#sp-right-panel .sp-advanced-accordion button {
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+#sp-right-panel .sp-advanced-accordion button,
+#sp-right-panel .sp-advanced-accordion summary {
+  min-height: 46px !important;
+  color: #425a79 !important;
+  font-weight: 760 !important;
 }
 #sp-right-panel .accordion {
-  border: 1px solid var(--sp-border) !important;
+  background: rgba(255,255,255,0.44) !important;
+  border-color: rgba(206, 221, 240, 0.92) !important;
   box-shadow: none !important;
 }
-#sp-right-panel .accordion button {
-  width: 100% !important;
-  border: 0 !important;
-  outline: none !important;
-  box-shadow: none !important;
+#sp-right-panel .gradio-slider input,
+#sp-right-panel input[type=\"range\"] {
+  accent-color: #5bb8ff !important;
 }
-#sp-right-panel .accordion:focus-within,
-#sp-right-panel .accordion button:focus {
-  outline: none !important;
-  box-shadow: none !important;
+#sp-center-panel > .sp-card:first-child,
+#sp-center-panel .sp-card:first-child {
+  background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(243,249,255,0.78)) !important;
 }
-#run-analysis-text textarea {
-  max-height: 430px !important;
-  overflow-y: auto !important;
-  resize: vertical !important;
-  line-height: 1.65 !important;
+#run-analysis-text textarea { min-height: 260px !important; line-height: 1.7 !important; resize: vertical !important; }
+.sp-card, .sp-card-tight, .sp-metric, .sp-hero-card, .sp-showcase-card, .tab-nav button, button, .gradio-button, #canvas-shell iframe {
+  transition: transform var(--sp-ease), box-shadow var(--sp-ease), border-color var(--sp-ease), background var(--sp-ease) !important;
+}
+.sp-card:hover, .sp-card-tight:hover, .sp-metric:hover { transform: translate3d(0, -2px, 0); border-color: var(--sp-border-strong) !important; box-shadow: 0 18px 36px rgba(122, 144, 184, 0.16) !important; }
+@keyframes spOrbit { from { transform: rotate(0deg) scale(1); } 50% { transform: rotate(180deg) scale(1.02); } to { transform: rotate(360deg) scale(1); } }
+@media (min-width: 640px) {
+  .gradio-container { padding: 18px !important; }
+  #sp-app-inner { padding: 16px; }
+  #sp-topbar { grid-template-columns: 1fr auto; align-items: center; }
+  .sp-toolbar { justify-content: flex-end; }
+}
+@media (min-width: 960px) {
+  #workspace-main-row { grid-template-columns: minmax(320px, 0.95fr) minmax(420px, 1.55fr) minmax(300px, 0.9fr); align-items: start; }
+}
+@media (max-width: 959px) {
+  #sp-topbar { grid-template-columns: 1fr; }
+  .sp-toolbar { justify-content: flex-start; }
+  .sp-workflow-head { align-items: flex-start; flex-direction: column; }
+}
+@media (max-width: 640px) {
+  .gradio-container { padding: 8px !important; }
+  #sp-app-inner { padding: 12px; }
+  .sp-brand { grid-template-columns: 48px 1fr; gap: 12px; }
+  .sp-logo { width: 44px; height: 44px; font-size: 17px; }
+  .sp-workflow-rail { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
 """
-
 
 OUTPUT_DIR = "outputs"
 COMPOSITE_DIR = os.path.join(OUTPUT_DIR, "composites")
@@ -754,6 +827,7 @@ EXPLAIN_DIR = os.path.join(OUTPUT_DIR, "explanations")
 MASK_DIR = os.path.join(OUTPUT_DIR, "masks")
 REPORT_RESULT_DIR = os.path.join("report", "results")
 CASE_DIR = os.path.join("report", "cases")
+
 CONFIG_PATH = "configs/default.yaml"
 
 for path in [COMPOSITE_DIR, TABLE_DIR, LOG_DIR, EXPLAIN_DIR, MASK_DIR, REPORT_RESULT_DIR, CASE_DIR]:
@@ -771,27 +845,60 @@ cfg = load_config()
 logger = InferenceLogger(log_dir=LOG_DIR, enable_file_log=cfg.get("output", {}).get("save_log", True))
 
 scorer_cfg = cfg.get("scorer", {})
-libcom_cfg = scorer_cfg.get("libcom_opa_subprocess", {})
-base_opa_scorer = LibcomOPASubprocessScorer(
-    python_path=libcom_cfg.get("python_path", ".venv_libcom/Scripts/python.exe"),
-    script_path=libcom_cfg.get("script_path", "scripts/libcom_opa_infer_once.py"),
-    batch_script_path=libcom_cfg.get("batch_script_path", "scripts/libcom_opa_infer_batch.py"),
-    device=libcom_cfg.get("device", "cuda:0"),
-    model_type=libcom_cfg.get("model_type", "SimOPA"),
-    temp_dir=libcom_cfg.get("temp_dir", "outputs/libcom_subprocess"),
-    timeout_seconds=libcom_cfg.get("timeout_seconds", 120),
-    logger=logger,
-)
+active_backend = scorer_cfg.get("active_backend", "handin_opa_subprocess")
 calibration_cfg = scorer_cfg.get("smartplace_opa_calibrated", {})
-scorer = SmartPlaceOPACalibratedScorer(
-    base_scorer=base_opa_scorer,
-    opa_weight=calibration_cfg.get("opa_weight", 0.72),
-    geometry_weight=calibration_cfg.get("geometry_weight", 0.14),
-    contact_weight=calibration_cfg.get("contact_weight", 0.08),
-    support_weight=calibration_cfg.get("support_weight", 0.06),
-    out_of_bounds_cap=calibration_cfg.get("out_of_bounds_cap", 0.20),
-    logger=logger,
-)
+libcom_cfg = scorer_cfg.get("libcom_opa_subprocess", {})
+runtime_scorer_cache = {}
+
+
+def _build_calibrated_scorer(backend_key: str) -> SmartPlaceOPACalibratedScorer:
+    if backend_key == "handin_opa_subprocess":
+        handin_cfg = scorer_cfg.get("handin_opa_subprocess", {})
+        base_scorer = HandinOPASubprocessScorer(
+            python_path=handin_cfg.get("python_path", "../handin/.venv/Scripts/python.exe"),
+            script_path=handin_cfg.get("script_path", "scripts/handin_opa_infer_once.py"),
+            batch_script_path=handin_cfg.get("batch_script_path", "scripts/handin_opa_infer_batch.py"),
+            handin_root=handin_cfg.get("handin_root", "../handin"),
+            weight_path=handin_cfg.get("weight_path", "../handin/experiments/ablation_study/resnet18_w05_20260609_161229/checkpoints/resnet18_w05_best-acc-0.718_epoch15_f1-0.614.pth"),
+            device=handin_cfg.get("device", "cpu"),
+            model_name=handin_cfg.get("model_name", "resnet"),
+            layers=handin_cfg.get("layers", 18),
+            width_factor=handin_cfg.get("width_factor", 0.5),
+            temp_dir=handin_cfg.get("temp_dir", "outputs/handin_subprocess"),
+            timeout_seconds=handin_cfg.get("timeout_seconds", 120),
+            logger=logger,
+        )
+    else:
+        base_scorer = LibcomOPASubprocessScorer(
+            python_path=libcom_cfg.get("python_path", ".venv_libcom/Scripts/python.exe"),
+            script_path=libcom_cfg.get("script_path", "scripts/libcom_opa_infer_once.py"),
+            batch_script_path=libcom_cfg.get("batch_script_path", "scripts/libcom_opa_infer_batch.py"),
+            device=libcom_cfg.get("device", "cuda:0"),
+            model_type=libcom_cfg.get("model_type", "SimOPA"),
+            temp_dir=libcom_cfg.get("temp_dir", "outputs/libcom_subprocess"),
+            timeout_seconds=libcom_cfg.get("timeout_seconds", 120),
+            logger=logger,
+        )
+
+    return SmartPlaceOPACalibratedScorer(
+        base_scorer=base_scorer,
+        opa_weight=calibration_cfg.get("opa_weight", 0.72),
+        geometry_weight=calibration_cfg.get("geometry_weight", 0.14),
+        contact_weight=calibration_cfg.get("contact_weight", 0.08),
+        support_weight=calibration_cfg.get("support_weight", 0.06),
+        out_of_bounds_cap=calibration_cfg.get("out_of_bounds_cap", 0.20),
+        logger=logger,
+    )
+
+
+def get_runtime_scorer(backend_key: str | None = None) -> SmartPlaceOPACalibratedScorer:
+    key = backend_key or active_backend
+    if key not in runtime_scorer_cache:
+        runtime_scorer_cache[key] = _build_calibrated_scorer(key)
+    return runtime_scorer_cache[key]
+
+
+scorer = get_runtime_scorer(active_backend)
 
 multi_cfg = scorer_cfg.get("libcom_multimodel", {})
 libcom_multimodel = LibcomMultiModelSubprocess(
@@ -800,6 +907,19 @@ libcom_multimodel = LibcomMultiModelSubprocess(
     device=multi_cfg.get("device", libcom_cfg.get("device", "cuda:0")),
     temp_dir=multi_cfg.get("temp_dir", "outputs/libcom_multimodel"),
     logger=logger,
+)
+
+u2net_cfg = cfg.get("u2net", {})
+u2net_runner = HandinU2NetSubprocessMatting(
+    python_path=u2net_cfg.get("python_path", "../handin/.venv/Scripts/python.exe"),
+    script_path=u2net_cfg.get("script_path", "scripts/handin_u2net_infer_once.py"),
+    handin_root=u2net_cfg.get("handin_root", "../handin"),
+    model_type=u2net_cfg.get("model_type", "u2netp"),
+    weight_path=u2net_cfg.get("weight_path", "../handin/u2netp.pth"),
+    device=u2net_cfg.get("device", "cpu"),
+    threshold=u2net_cfg.get("threshold", 0.5),
+    temp_dir=u2net_cfg.get("temp_dir", "outputs/handin_u2net"),
+    timeout_seconds=u2net_cfg.get("timeout_seconds", 120),
 )
 
 
@@ -871,7 +991,7 @@ def assign_relative_labels_in_place(results: List[Dict[str, Any]], top_k: int) -
 
 
 def build_model_info_text() -> str:
-    info = scorer.get_model_info()
+    info = get_runtime_scorer(active_backend).get_model_info()
     lines = [
         f"模型名称：{info.get('model_name')}",
         f"加载状态：{'已加载' if info.get('is_loaded') else '未加载'}",
@@ -972,6 +1092,7 @@ def prepare_drag_canvas(background_image, foreground_image, mask_mode, white_bg_
         mode=mask_mode,
         white_bg_threshold=int(white_bg_threshold),
         edge_sample_ratio=float(mask_cfg.get("edge_sample_ratio", 0.08)),
+        handin_u2net_runner=u2net_runner,
     )
 
     processed_fg_path = None
@@ -1035,11 +1156,13 @@ def prepare_drag_canvas(background_image, foreground_image, mask_mode, white_bg_
   }}
   .panel {{
     box-sizing: border-box;
-    border: 1px solid rgba(255,255,255,0.78);
-    padding: 24px;
-    border-radius: 24px;
-    background: linear-gradient(145deg, rgba(255,255,255,0.86), rgba(255,255,255,0.58));
-    box-shadow: 0 18px 44px rgba(31,41,55,0.10);
+    border: 1px solid rgba(255,255,255,0.82);
+    padding: 22px;
+    border-radius: 28px;
+    background:
+      radial-gradient(circle at top left, rgba(91,141,239,0.10), transparent 34%),
+      linear-gradient(145deg, rgba(255,255,255,0.92), rgba(248,252,255,0.68));
+    box-shadow: 0 20px 46px rgba(115,135,176,0.14);
     backdrop-filter: blur(16px) saturate(130%);
   }}
   .titlebar {{
@@ -1086,21 +1209,27 @@ def prepare_drag_canvas(background_image, foreground_image, mask_mode, white_bg_
     width: {canvas_w}px;
     height: {canvas_h}px;
     max-width: 100%;
-    border: 1px solid rgba(148,163,184,0.30);
-    border-radius: 20px;
-    background: #fff;
+    border: 1px solid rgba(163,198,235,0.42);
+    border-radius: 24px;
+    background:
+      radial-gradient(circle at 12% 16%, rgba(91,141,239,0.10), transparent 26%),
+      radial-gradient(circle at 84% 10%, rgba(119,200,232,0.08), transparent 22%),
+      #ffffff;
     overflow: hidden;
     user-select: none;
     touch-action: none;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.90), 0 16px 34px rgba(31,41,55,0.08);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.96),
+      0 22px 42px rgba(113,135,181,0.16),
+      0 0 0 10px rgba(91,141,239,0.05);
   }}
   #stage::after {{
     content: "";
     position: absolute;
     inset: 0;
     pointer-events: none;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.35);
-    border-radius: 20px;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.42);
+    border-radius: 24px;
   }}
   #bg {{
     position: absolute;
@@ -1118,7 +1247,7 @@ def prepare_drag_canvas(background_image, foreground_image, mask_mode, white_bg_
     height: {display_fg_h}px;
     cursor: grab;
     touch-action: none;
-    filter: drop-shadow(0 16px 22px rgba(15,23,42,0.16));
+    filter: drop-shadow(0 18px 24px rgba(15,23,42,0.16));
   }}
   #box {{
     position: absolute;
@@ -1127,10 +1256,10 @@ def prepare_drag_canvas(background_image, foreground_image, mask_mode, white_bg_
     width: {display_fg_w}px;
     height: {display_fg_h}px;
     border: 2px solid rgba(91,141,239,0.92);
-    border-radius: 14px;
+    border-radius: 18px;
     box-sizing: border-box;
     pointer-events: none;
-    box-shadow: 0 0 0 5px rgba(91,141,239,0.14), 0 0 24px rgba(119,200,232,0.22);
+    box-shadow: 0 0 0 6px rgba(91,141,239,0.12), 0 0 28px rgba(119,200,232,0.24);
   }}
   #status {{
     font-size: 14px;
@@ -1392,6 +1521,7 @@ def score_drag_candidates(
     manual_label,
     manual_reason,
     drag_mode_state,
+    score_backend,
 ):
     if bg_state is None or fg_state is None:
         raise gr.Error("请先点击“加载拖拽画布”。")
@@ -1410,6 +1540,8 @@ def score_drag_candidates(
     enable_feature_analysis = as_enabled(enable_feature_analysis)
     enable_libcom_suite = as_enabled(enable_libcom_suite)
     run_id = time.strftime("%Y%m%d_%H%M%S")
+    scorer = get_runtime_scorer(score_backend)
+    mask_info["score_backend"] = score_backend
 
     logger.section("[SmartPlace-Drag] Start drag candidate scoring")
     logger.log(f"[Input] background_size={background.size}")
@@ -1697,49 +1829,45 @@ with gr.Blocks(
 
     gr.HTML(
         """
-<div id="sp-app-frame">
+<header id="sp-app-frame" role="banner">
   <div id="sp-app-inner">
     <div id="sp-topbar">
       <div class="sp-brand">
-        <div class="sp-logo">SP</div>
+        <div class="sp-logo" aria-hidden="true">SP</div>
         <div>
           <h1>SmartPlace Studio</h1>
-          <p>智能物体放置 · 交互式评分 · 课堂答辩展示平台</p>
+          <p>Compact AI workbench for object placement scoring</p>
         </div>
       </div>
-      <div class="sp-status-strip">
+      <div class="sp-toolbar" aria-label="system toolbar">
+        <span class="sp-mode-pill">Demo / Expert</span>
         <span class="sp-pill"><span class="sp-pill-dot"></span>Local Inference Ready</span>
-        <span class="sp-pill">libcom OPA</span>
-        <span class="sp-pill">Drag Canvas</span>
-        <span class="sp-pill">Top-K Report</span>
+        <span class="sp-pill">Libcom OPA</span>
+        <span class="sp-toolbar-btn">Export Report</span>
       </div>
     </div>
 
-    <div id="sp-hero-grid">
-      <div class="sp-hero-card">
-        <div class="sp-kicker">Science & Innovation Demo</div>
-        <h2>把物体放到更自然的位置，<span>让模型给出可解释推荐。</span></h2>
-        <p>
-          上传背景图与前景物体，在画布中直接拖拽生成候选位置。系统会合成 composite image 与 composite mask，
-          调用真实 libcom OPAScoreModel 完成批量评分，并生成 Top-K 推荐、候选评分表、案例记录与可复现实验文件。
-        </p>
-        <div class="sp-hero-actions">
-          <span class="sp-soft-tag">清爽浅色系</span>
-          <span class="sp-soft-tag">模型真实运行证据</span>
-          <span class="sp-soft-tag">答辩演示友好</span>
-          <span class="sp-soft-tag">报告自动导出</span>
+    <section id="sp-hero-grid" aria-label="workflow status">
+      <div class="sp-workflow-card">
+        <div class="sp-workflow-head">
+          <span class="sp-workflow-title">Workflow Status</span>
+          <span class="sp-workflow-note">Upload, drag, score, explain, export.</span>
+        </div>
+        <div class="sp-workflow-rail">
+          <span class="sp-work-step is-active">Upload Assets</span>
+          <span class="sp-work-arrow">&rarr;</span>
+          <span class="sp-work-step is-active">Drag Candidate</span>
+          <span class="sp-work-arrow">&rarr;</span>
+          <span class="sp-work-step">Score</span>
+          <span class="sp-work-arrow">&rarr;</span>
+          <span class="sp-work-step">Explain</span>
+          <span class="sp-work-arrow">&rarr;</span>
+          <span class="sp-work-step">Export</span>
         </div>
       </div>
-      <div class="sp-showcase-card">
-        <div class="sp-score-orbit"></div>
-        <div>
-          <h3>展示逻辑更像产品，而不是脚本界面</h3>
-          <p>输入、交互、评分、解释、导出分区明确，现场演示时可以顺着流程自然讲解。</p>
-        </div>
-      </div>
-    </div>
+    </section>
   </div>
-</div>
+</header>
         """
     )
 
@@ -1753,6 +1881,8 @@ with gr.Blocks(
 </div>
         """
     )
+
+    gr.HTML("")
 
     with gr.Tabs(selected="workspace"):
         with gr.Tab("01 · 创作工作台", id="workspace"):
@@ -1810,37 +1940,88 @@ with gr.Blocks(
                             drag_y_input = gr.Textbox(label="当前 y", value="0", elem_id="drag_y_input")
                             drag_scale_input = gr.Textbox(label="当前 scale", value="0.25", elem_id="drag_scale_input")
 
-                with gr.Column(scale=3, min_width=360, elem_id="sp-right-panel"):
+                with gr.Column(scale=3, min_width=400, elem_id="sp-right-panel"):
                     with gr.Group(elem_classes=["sp-card"]):
                         gr.HTML("<div class='sp-section-title'>模型与参数</div><div class='sp-subtitle'>参数越少越适合演示，更多选项已收纳。</div>")
-                        mask_mode_input = gr.State(cfg.get("mask_processor", {}).get("default_mode", "自动判断"))
-                        white_bg_threshold_input = gr.Slider(
-                            minimum=10,
-                            maximum=100,
-                            value=cfg.get("mask_processor", {}).get("white_bg_threshold", 38),
-                            step=2,
-                            label="去底阈值",
-                            buttons=[],
+                        gr.HTML("<div class='sp-param-title'>评分后端</div>")
+                        score_backend_input = gr.Dropdown(
+                            choices=[
+                                ("handin OPA + SmartPlace 校准", "handin_opa_subprocess"),
+                                ("libcom OPA + SmartPlace 校准", "libcom_opa_subprocess"),
+                            ],
+                            value=active_backend,
+                            show_label=False,
+                            container=False,
+                            elem_classes=["sp-flat-select"],
                         )
-                        scale_input = gr.Slider(minimum=0.05, maximum=0.8, value=0.25, step=0.05, label="前景缩放比例", buttons=[])
-                        top_k_input = gr.Slider(minimum=1, maximum=5, value=3, step=1, label="Top-K 数量", buttons=[])
-                        filter_out_of_bounds_input = gr.Radio(choices=["ON", "OFF"], value="ON", label="过滤越界候选", interactive=True)
-                        enable_explanation_input = gr.Radio(choices=["OFF", "ON"], value="OFF", label="生成遮挡实验热力图（慢）", interactive=True)
-                        enable_saliency_input = gr.Radio(choices=["OFF", "ON"], value="OFF", label="生成梯度显著性图", interactive=True)
-                        enable_feature_analysis_input = gr.Radio(choices=["OFF", "ON"], value="OFF", label="生成中间特征分析", interactive=True)
-                        enable_libcom_suite_input = gr.Radio(choices=["OFF", "ON"], value="OFF", label="启用 LibCom 增强模型（慢）", interactive=True)
-                        libcom_suite_models_input = gr.Dropdown(
+                        gr.HTML("<div class='sp-param-title'>前景处理模式</div>")
+                        mask_mode_input = gr.Dropdown(
+                            choices=["自动判断", "透明 PNG Alpha", "浅色/纯色背景去除", "U2Net 自动抠图", "不处理"],
+                            value=cfg.get("mask_processor", {}).get("default_mode", "自动判断"),
+                            show_label=False,
+                            container=False,
+                            elem_classes=["sp-flat-select"],
+                        )
+                        with gr.Group(elem_classes=["sp-param-block"]):
+                            with gr.Row(elem_classes=["sp-param-row"], equal_height=True):
+                                gr.HTML("<div class='sp-param-name'>去底阈值</div>")
+                                white_bg_threshold_display = gr.Textbox(value=format_param_value(cfg.get('mask_processor', {}).get('white_bg_threshold', 38)), show_label=False, container=False, interactive=False, elem_classes=["sp-value-badge"])
+                            white_bg_threshold_input = gr.Slider(minimum=10, maximum=100, value=cfg.get("mask_processor", {}).get("white_bg_threshold", 38), step=2, show_label=False, container=False, buttons=[], elem_classes=["sp-flat-slider"])
+                        with gr.Group(elem_classes=["sp-param-block"]):
+                            with gr.Row(elem_classes=["sp-param-row"], equal_height=True):
+                                gr.HTML("<div class='sp-param-name'>前景缩放比例</div>")
+                                scale_display = gr.Textbox(value=format_param_value(0.25, 2), show_label=False, container=False, interactive=False, elem_classes=["sp-value-badge"])
+                            scale_input = gr.Slider(minimum=0.05, maximum=0.8, value=0.25, step=0.05, show_label=False, container=False, buttons=[], elem_classes=["sp-flat-slider"])
+                        with gr.Group(elem_classes=["sp-param-block"]):
+                            with gr.Row(elem_classes=["sp-param-row"], equal_height=True):
+                                gr.HTML("<div class='sp-param-name'>Top-K 数量</div>")
+                                top_k_display = gr.Textbox(value=format_param_value(3), show_label=False, container=False, interactive=False, elem_classes=["sp-value-badge"])
+                            top_k_input = gr.Slider(minimum=1, maximum=5, value=3, step=1, show_label=False, container=False, buttons=[], elem_classes=["sp-flat-slider"])
+                        with gr.Group(elem_classes=["sp-switch-row"]):
+                            gr.HTML("<div class='sp-param-name'>过滤越界候选</div>")
+                            filter_out_of_bounds_input = gr.Checkbox(value=True, show_label=False, container=False, elem_classes=["sp-single-switch"])
+                        with gr.Group(elem_classes=["sp-switch-row"]):
+                            gr.HTML("<div class='sp-param-name'>实验热力图</div>")
+                            enable_explanation_input = gr.Checkbox(value=False, show_label=False, container=False, elem_classes=["sp-single-switch"])
+                        with gr.Group(elem_classes=["sp-switch-row"]):
+                            gr.HTML("<div class='sp-param-name'>梯度显著图</div>")
+                            enable_saliency_input = gr.Checkbox(value=False, show_label=False, container=False, elem_classes=["sp-single-switch"])
+                        with gr.Group(elem_classes=["sp-switch-row"]):
+                            gr.HTML("<div class='sp-param-name'>中间特征分析</div>")
+                            enable_feature_analysis_input = gr.Checkbox(value=False, show_label=False, container=False, elem_classes=["sp-single-switch"])
+                        with gr.Group(elem_classes=["sp-switch-row"]):
+                            gr.HTML("<div class='sp-param-name'>启用 LibCom 增强模型</div>")
+                            enable_libcom_suite_input = gr.Checkbox(value=False, show_label=False, container=False, elem_classes=["sp-single-switch"])
+                        gr.HTML("<div class='sp-param-title'>增强模型</div>")
+                        libcom_suite_models_input = gr.CheckboxGroup(
                             choices=["fopa", "fos", "harmony", "pctnet", "lbm"],
                             value=["fopa", "fos", "harmony"],
-                            multiselect=True,
-                            label="增强模型选择",
+                            show_label=False,
+                            container=False,
+                            elem_classes=["sp-chip-group"],
                         )
-                        with gr.Accordion("LibCom 高级参数", open=True):
-                            lbm_steps_input = gr.Slider(minimum=1, maximum=8, value=4, step=1, label="LBM 步数", buttons=[])
-                            lbm_resolution_input = gr.Slider(minimum=512, maximum=1024, value=768, step=128, label="LBM 分辨率", buttons=[])
-                        with gr.Accordion("高级解释图参数", open=True):
-                            occlusion_patch_size_input = gr.Slider(minimum=48, maximum=160, value=96, step=16, label="遮挡块大小", buttons=[])
-                            occlusion_stride_input = gr.Slider(minimum=32, maximum=128, value=96, step=16, label="遮挡滑动步长", buttons=[])
+                        with gr.Accordion("LibCom 高级参数", open=False, elem_classes=["sp-advanced-accordion"]):
+                            with gr.Group(elem_classes=["sp-param-block"]):
+                                with gr.Row(elem_classes=["sp-param-row"], equal_height=True):
+                                    gr.HTML("<div class='sp-param-name'>LBM 步数</div>")
+                                    lbm_steps_display = gr.Textbox(value=format_param_value(4), show_label=False, container=False, interactive=False, elem_classes=["sp-value-badge"])
+                                lbm_steps_input = gr.Slider(minimum=1, maximum=8, value=4, step=1, show_label=False, container=False, buttons=[], elem_classes=["sp-flat-slider"])
+                            with gr.Group(elem_classes=["sp-param-block"]):
+                                with gr.Row(elem_classes=["sp-param-row"], equal_height=True):
+                                    gr.HTML("<div class='sp-param-name'>LBM 分辨率</div>")
+                                    lbm_resolution_display = gr.Textbox(value=format_param_value(768), show_label=False, container=False, interactive=False, elem_classes=["sp-value-badge"])
+                                lbm_resolution_input = gr.Slider(minimum=512, maximum=1024, value=768, step=128, show_label=False, container=False, buttons=[], elem_classes=["sp-flat-slider"])
+                        with gr.Accordion("高级解释图参数", open=False, elem_classes=["sp-advanced-accordion"]):
+                            with gr.Group(elem_classes=["sp-param-block"]):
+                                with gr.Row(elem_classes=["sp-param-row"], equal_height=True):
+                                    gr.HTML("<div class='sp-param-name'>遮挡块大小</div>")
+                                    occlusion_patch_size_display = gr.Textbox(value=format_param_value(96), show_label=False, container=False, interactive=False, elem_classes=["sp-value-badge"])
+                                occlusion_patch_size_input = gr.Slider(minimum=48, maximum=160, value=96, step=16, show_label=False, container=False, buttons=[], elem_classes=["sp-flat-slider"])
+                            with gr.Group(elem_classes=["sp-param-block"]):
+                                with gr.Row(elem_classes=["sp-param-row"], equal_height=True):
+                                    gr.HTML("<div class='sp-param-name'>遮挡滑动步长</div>")
+                                    occlusion_stride_display = gr.Textbox(value=format_param_value(96), show_label=False, container=False, interactive=False, elem_classes=["sp-value-badge"])
+                                occlusion_stride_input = gr.Slider(minimum=32, maximum=128, value=96, step=16, show_label=False, container=False, buttons=[], elem_classes=["sp-flat-slider"])
 
         with gr.Tab("02 · 结果仪表盘", id="results"):
             with gr.Row(equal_height=False):
@@ -1887,6 +2068,14 @@ with gr.Blocks(
                 with gr.Row():
                     case_summary_csv_file = gr.File(label="测试案例汇总 CSV")
                     case_summary_md_file = gr.File(label="测试案例汇总 Markdown")
+
+    white_bg_threshold_input.change(lambda value: format_param_value(value), inputs=white_bg_threshold_input, outputs=white_bg_threshold_display)
+    scale_input.change(lambda value: format_param_value(value, 2), inputs=scale_input, outputs=scale_display)
+    top_k_input.change(lambda value: format_param_value(value), inputs=top_k_input, outputs=top_k_display)
+    lbm_steps_input.change(lambda value: format_param_value(value), inputs=lbm_steps_input, outputs=lbm_steps_display)
+    lbm_resolution_input.change(lambda value: format_param_value(value), inputs=lbm_resolution_input, outputs=lbm_resolution_display)
+    occlusion_patch_size_input.change(lambda value: format_param_value(value), inputs=occlusion_patch_size_input, outputs=occlusion_patch_size_display)
+    occlusion_stride_input.change(lambda value: format_param_value(value), inputs=occlusion_stride_input, outputs=occlusion_stride_display)
 
     load_canvas_button.click(
         fn=prepare_drag_canvas,
@@ -1944,6 +2133,7 @@ with gr.Blocks(
             manual_label_input,
             manual_reason_input,
             drag_mode_state,
+            score_backend_input,
         ],
         outputs=[
             candidate_gallery,
