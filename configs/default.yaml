@@ -3,6 +3,20 @@ project:
   version: realmodel-v1-subprocess
 
 scorer:
+  active_backend: handin_opa_subprocess
+  handin_opa_subprocess:
+    name: HandinOPASubprocessScorer
+    python_path: ../handin/.venv/Scripts/python.exe
+    script_path: scripts/handin_opa_infer_once.py
+    batch_script_path: scripts/handin_opa_infer_batch.py
+    handin_root: ../handin
+    weight_path: ../handin/experiments/ablation_study/resnet18_w05_20260609_161229/checkpoints/resnet18_w05_best-acc-0.718_epoch15_f1-0.614.pth
+    model_name: resnet
+    layers: 18
+    width_factor: 0.5
+    device: cpu
+    temp_dir: outputs/handin_subprocess
+    timeout_seconds: 120
   libcom_opa_subprocess:
     name: LibcomOPASubprocessScorer
     python_path: .venv_libcom/Scripts/python.exe
@@ -27,9 +41,20 @@ scorer:
     temp_dir: outputs/libcom_multimodel
 
 mask_processor:
-  default_mode: 自动判断
+  default_mode: U2Net 自动抠图
   white_bg_threshold: 38
   edge_sample_ratio: 0.08
+
+u2net:
+  python_path: ../handin/.venv/Scripts/python.exe
+  script_path: scripts/handin_u2net_infer_once.py
+  handin_root: ../handin
+  model_type: u2netp
+  weight_path: ../handin/u2netp.pth
+  device: cpu
+  threshold: 0.5
+  temp_dir: outputs/handin_u2net
+  timeout_seconds: 120
 
 threshold:
   recommend: 0.75

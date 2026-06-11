@@ -9,8 +9,12 @@ __pycache__/
 outputs/
 report/cases/
 report/results/
+backend/storage/
+react-workbench/node_modules/
+react-workbench/dist/
 
 third_party/libcom/
 
 .DS_Store
 Thumbs.db
+/handin/

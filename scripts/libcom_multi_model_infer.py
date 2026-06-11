@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List
 
 import cv2
+import numpy as np
 
 
 def parse_args():
@@ -42,6 +43,28 @@ def json_safe(value: Any):
     if isinstance(value, dict):
         return {str(k): json_safe(v) for k, v in value.items()}
     return value
+
+
+def read_image_unicode(path: str):
+    data = np.fromfile(path, dtype=np.uint8)
+    if data.size == 0:
+      return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def read_mask_unicode(path: str):
+    data = np.fromfile(path, dtype=np.uint8)
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+
+
+def write_image_unicode(path: str, image) -> None:
+    ext = os.path.splitext(path)[1] or ".png"
+    ok, encoded = cv2.imencode(ext, image)
+    if not ok:
+        raise RuntimeError(f"Failed to encode image for saving: {path}")
+    encoded.tofile(path)
 
 
 def normalize_device(device: str):
@@ -98,12 +121,32 @@ def run_fos(args, device, bbox: List[int]) -> Dict:
     from libcom import FOSScoreModel
 
     net = FOSScoreModel(device=device, model_type="FOS_D")
-    score = net(args.background, args.foreground, bbox, foreground_mask=args.foreground_mask)
+    background = read_image_unicode(args.background)
+    foreground = read_image_unicode(args.foreground)
+    foreground_mask = read_image_unicode(args.foreground_mask)
+    if background is None:
+        raise RuntimeError(f"Failed to decode background image: {args.background}")
+    if foreground is None:
+        raise RuntimeError(f"Failed to decode foreground image: {args.foreground}")
+    if foreground_mask is None:
+        raise RuntimeError(f"Failed to decode foreground mask: {args.foreground_mask}")
+    bg_h, bg_w = background.shape[:2]
+    x1, y1, x2, y2 = bbox
+    clipped_bbox = [
+        max(0, min(int(x1), bg_w - 1)),
+        max(0, min(int(y1), bg_h - 1)),
+        max(1, min(int(x2), bg_w)),
+        max(1, min(int(y2), bg_h)),
+    ]
+    if clipped_bbox[2] <= clipped_bbox[0] or clipped_bbox[3] <= clipped_bbox[1]:
+        raise RuntimeError(f"Invalid clipped bbox for FOS: original={bbox}, clipped={clipped_bbox}")
+    score = net(background, foreground, clipped_bbox, foreground_mask=foreground_mask)
     return {
         "model": "FOSScoreModel",
         "model_type": "FOS_D",
         "description": "Scores foreground/background compatibility from geometry and semantics.",
         "score": float(score),
+        "bbox_used": clipped_bbox,
     }
 
 
@@ -111,7 +154,13 @@ def run_harmony(args, device) -> Dict:
     from libcom import HarmonyScoreModel
 
     net = HarmonyScoreModel(device=device, model_type="BargainNet")
-    score = net(args.composite, args.composite_mask)
+    composite = read_image_unicode(args.composite)
+    composite_mask = read_mask_unicode(args.composite_mask)
+    if composite is None:
+        raise RuntimeError(f"Failed to decode composite image: {args.composite}")
+    if composite_mask is None:
+        raise RuntimeError(f"Failed to decode composite mask: {args.composite_mask}")
+    score = net(composite, composite_mask)
     return {
         "model": "HarmonyScoreModel",
         "model_type": "BargainNet",
@@ -127,9 +176,18 @@ def run_harmonization(args, device, model_type: str) -> Dict:
     kwargs = {}
     if model_type == "LBM":
         kwargs = {"steps": args.lbm_steps, "resolution": args.lbm_resolution}
-    output = net(args.composite, args.composite_mask, **kwargs)
+    if model_type == "LBM":
+        output = net(args.composite, args.composite_mask, **kwargs)
+    else:
+        composite = read_image_unicode(args.composite)
+        composite_mask = read_mask_unicode(args.composite_mask)
+        if composite is None:
+            raise RuntimeError(f"Failed to decode composite image: {args.composite}")
+        if composite_mask is None:
+            raise RuntimeError(f"Failed to decode composite mask: {args.composite_mask}")
+        output = net(composite, composite_mask, **kwargs)
     out_path = os.path.join(args.output_dir, f"harmonized_{model_type}.png")
-    cv2.imwrite(out_path, output)
+    write_image_unicode(out_path, output)
     return {
         "model": "ImageHarmonizationModel",
         "model_type": model_type,
