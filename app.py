@@ -34,6 +34,7 @@ from utils.case_manager import (
     export_case_summary_csv,
     export_case_summary_markdown,
 )
+from utils.auto_candidate_area_search import auto_candidate_area_search
 
 
 def collect_preset_images(folder: str, limit: int = 6) -> List[str]:
@@ -995,332 +996,10 @@ def prepare_drag_canvas(background_image, foreground_image, mask_mode, white_bg_
     )
     fg_w, fg_h = resized_fg.size
 
-    canvas_scale = min(980 / bg_w, 680 / bg_h, 1.0)
-    canvas_w = int(bg_w * canvas_scale)
-    canvas_h = int(bg_h * canvas_scale)
-    display_fg_w = int(fg_w * canvas_scale)
-    display_fg_h = int(fg_h * canvas_scale)
-
     init_x = max(0, (bg_w - fg_w) // 2)
     init_y = max(0, bg_h - fg_h - int(bg_h * 0.08))
 
-    bg_url = pil_to_data_url(background)
-    fg_url = pil_to_data_url(resized_fg)
-
-    # 关键改动：
-    # 不再直接把 <script> 塞进 gr.HTML。
-    # 改为 iframe srcdoc，让脚本在 iframe 内稳定执行。
-    srcdoc = f"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-<style>
-  :root {{
-    --ink: #172033;
-    --muted: #708099;
-    --line: rgba(148, 163, 184, 0.26);
-    --primary: #5b8def;
-    --primary2: #77c8e8;
-    --panel: rgba(255,255,255,0.78);
-  }}
-  html, body {{
-    margin: 0;
-    padding: 0;
-    background:
-      radial-gradient(circle at 8% 0%, rgba(119, 200, 232, 0.22), transparent 32%),
-      linear-gradient(180deg, #f8fbff, #f3f6fb);
-    font-family: Inter, Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
-    color: var(--ink);
-  }}
-  .panel {{
-    box-sizing: border-box;
-    border: 1px solid rgba(255,255,255,0.78);
-    padding: 24px;
-    border-radius: 24px;
-    background: linear-gradient(145deg, rgba(255,255,255,0.86), rgba(255,255,255,0.58));
-    box-shadow: 0 18px 44px rgba(31,41,55,0.10);
-    backdrop-filter: blur(16px) saturate(130%);
-  }}
-  .titlebar {{
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 16px;
-  }}
-  .title {{
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-weight: 820;
-    letter-spacing: -0.02em;
-  }}
-  .title::before {{
-    content: "";
-    width: 12px;
-    height: 12px;
-    border-radius: 999px;
-    background: linear-gradient(135deg, var(--primary), var(--primary2));
-    box-shadow: 0 0 0 6px rgba(91,141,239,0.10);
-  }}
-  .tips {{
-    font-size: 14px;
-    color: var(--muted);
-    line-height: 1.65;
-    margin-bottom: 18px;
-  }}
-  .chip {{
-    display: inline-flex;
-    align-items: center;
-    padding: 7px 10px;
-    border-radius: 999px;
-    background: rgba(91,141,239,0.09);
-    color: #3d69c6;
-    font-size: 12px;
-    font-weight: 760;
-    white-space: nowrap;
-  }}
-  #stage {{
-    position: relative;
-    width: {canvas_w}px;
-    height: {canvas_h}px;
-    max-width: 100%;
-    border: 1px solid rgba(148,163,184,0.30);
-    border-radius: 20px;
-    background: #fff;
-    overflow: hidden;
-    user-select: none;
-    touch-action: none;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.90), 0 16px 34px rgba(31,41,55,0.08);
-  }}
-  #stage::after {{
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.35);
-    border-radius: 20px;
-  }}
-  #bg {{
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: {canvas_w}px;
-    height: {canvas_h}px;
-    pointer-events: none;
-  }}
-  #fg {{
-    position: absolute;
-    left: {int(init_x * canvas_scale)}px;
-    top: {int(init_y * canvas_scale)}px;
-    width: {display_fg_w}px;
-    height: {display_fg_h}px;
-    cursor: grab;
-    touch-action: none;
-    filter: drop-shadow(0 16px 22px rgba(15,23,42,0.16));
-  }}
-  #box {{
-    position: absolute;
-    left: {int(init_x * canvas_scale)}px;
-    top: {int(init_y * canvas_scale)}px;
-    width: {display_fg_w}px;
-    height: {display_fg_h}px;
-    border: 2px solid rgba(91,141,239,0.92);
-    border-radius: 14px;
-    box-sizing: border-box;
-    pointer-events: none;
-    box-shadow: 0 0 0 5px rgba(91,141,239,0.14), 0 0 24px rgba(119,200,232,0.22);
-  }}
-  #status {{
-    font-size: 14px;
-    color: #465772;
-    margin-top: 12px;
-    padding: 13px 14px;
-    border-radius: 16px;
-    background: rgba(255,255,255,0.70);
-    border: 1px solid rgba(148,163,184,0.18);
-  }}
-</style>
-</head>
-<body>
-<div class="panel">
-  <div class="title">拖拽交互画布</div>
-  <div class="tips">
-    操作：鼠标按住物体拖动；也可以点击背景中的任意位置，将物体中心移动到该处。
-    调整好位置后，点击页面下方“记录当前拖拽位置为候选”。
-  </div>
-
-  <div id="stage">
-    <img id="bg" src="{bg_url}" />
-    <img id="fg" src="{fg_url}" />
-    <div id="box"></div>
-  </div>
-
-  <div id="status">当前位置：x={init_x}, y={init_y}, scale={float(scale):.3f}</div>
-</div>
-
-<script>
-(function() {{
-  const stage = document.getElementById("stage");
-  const fg = document.getElementById("fg");
-  const box = document.getElementById("box");
-  const status = document.getElementById("status");
-
-  const canvasScale = {canvas_scale};
-  const stageW = {canvas_w};
-  const stageH = {canvas_h};
-  const fgW = {display_fg_w};
-  const fgH = {display_fg_h};
-  const originalFgW = {fg_w};
-  const originalFgH = {fg_h};
-  const currentScale = {float(scale)};
-
-  let x = {int(init_x * canvas_scale)};
-  let y = {int(init_y * canvas_scale)};
-  let dragging = false;
-  let offsetX = 0;
-  let offsetY = 0;
-
-  window.smartplaceLocalDragState = {{
-    x: Math.round(x / canvasScale),
-    y: Math.round(y / canvasScale),
-    scale: currentScale
-  }};
-  window.getSmartPlaceDragState = function() {{
-    return window.smartplaceLocalDragState;
-  }};
-
-  function findInputInParent(elemId) {{
-    try {{
-      const root = parent.document.getElementById(elemId);
-      if (!root) return null;
-      return root.querySelector("textarea, input");
-    }} catch (e) {{
-      return null;
-    }}
-  }}
-
-  function setParentValue(elemId, value) {{
-    const input = findInputInParent(elemId);
-    if (!input) return;
-    input.value = String(value);
-    input.dispatchEvent(new Event("input", {{ bubbles: true }}));
-    input.dispatchEvent(new Event("change", {{ bubbles: true }}));
-  }}
-
-  function clamp() {{
-    x = Math.max(0, Math.min(stageW - fgW, x));
-    y = Math.max(0, Math.min(stageH - fgH, y));
-  }}
-
-  function update() {{
-    clamp();
-
-    fg.style.left = x + "px";
-    fg.style.top = y + "px";
-    box.style.left = x + "px";
-    box.style.top = y + "px";
-
-    const ox = Math.round(x / canvasScale);
-    const oy = Math.round(y / canvasScale);
-
-    setParentValue("drag_x_input", ox);
-    setParentValue("drag_y_input", oy);
-    setParentValue("drag_scale_input", currentScale);
-
-    window.smartplaceLocalDragState = {{
-      x: ox,
-      y: oy,
-      scale: currentScale
-    }};
-
-    try {{
-      parent.postMessage({{
-        type: "smartplace-drag-update",
-        x: ox,
-        y: oy,
-        scale: currentScale
-      }}, "*");
-    }} catch (e) {{}}
-
-    status.innerText =
-      "当前位置：x=" + ox +
-      ", y=" + oy +
-      ", scale=" + currentScale.toFixed(3) +
-      "；物体尺寸≈" + originalFgW + "×" + originalFgH;
-  }}
-
-  function pointerPosition(evt) {{
-    const rect = stage.getBoundingClientRect();
-    const sx = stageW / rect.width;
-    const sy = stageH / rect.height;
-    return {{
-      x: (evt.clientX - rect.left) * sx,
-      y: (evt.clientY - rect.top) * sy
-    }};
-  }}
-
-  stage.addEventListener("pointerdown", function(evt) {{
-    const p = pointerPosition(evt);
-
-    const inside =
-      p.x >= x && p.x <= x + fgW &&
-      p.y >= y && p.y <= y + fgH;
-
-    if (inside) {{
-      offsetX = p.x - x;
-      offsetY = p.y - y;
-    }} else {{
-      x = p.x - fgW / 2;
-      y = p.y - fgH / 2;
-      offsetX = fgW / 2;
-      offsetY = fgH / 2;
-    }}
-
-    dragging = true;
-    stage.setPointerCapture(evt.pointerId);
-    fg.style.cursor = "grabbing";
-    update();
-    evt.preventDefault();
-  }});
-
-  stage.addEventListener("pointermove", function(evt) {{
-    if (!dragging) return;
-    const p = pointerPosition(evt);
-    x = p.x - offsetX;
-    y = p.y - offsetY;
-    update();
-    evt.preventDefault();
-  }});
-
-  stage.addEventListener("pointerup", function(evt) {{
-    dragging = false;
-    fg.style.cursor = "grab";
-    update();
-    evt.preventDefault();
-  }});
-
-  stage.addEventListener("pointercancel", function(evt) {{
-    dragging = false;
-    fg.style.cursor = "grab";
-    update();
-  }});
-
-  update();
-}})();
-</script>
-</body>
-</html>
-"""
-
-    iframe_html = f"""
-<iframe
-  id="smartplace_drag_iframe"
-  srcdoc="{html_lib.escape(srcdoc, quote=True)}"
-  style="width:100%; height:{canvas_h + 190}px; border:0; border-radius:28px; background:transparent; box-shadow:0 24px 58px rgba(31,41,55,0.13);"
-></iframe>
-"""
+    iframe_html = _build_drag_canvas_html(background, foreground, scale, init_x, init_y)
 
     candidate_points = []
     candidate_df = pd.DataFrame(columns=["候选编号", "x", "y", "scale"])
@@ -1362,6 +1041,425 @@ def add_current_candidate(candidate_points, drag_x, drag_y, drag_scale):
 
 def clear_candidates():
     return [], pd.DataFrame(columns=["候选编号", "x", "y", "scale"])
+
+def run_auto_search(
+        bg_state,
+        fg_state,
+        mask_info_state,
+        candidate_points,
+        scale,
+        determine_coeff,
+        auto_coarse_n,
+        auto_coarse_m,
+        auto_samples_per_cell,
+        auto_fine_a,
+        auto_fine_b,
+):
+    """运行自动搜索，将最优位置呈现在画布上并加入候选列表。"""
+    if bg_state is None or fg_state is None:
+        raise gr.Error("请先点击“加载拖拽画布”。")
+
+        background = bg_state.convert("RGB")
+        foreground = fg_state.convert("RGBA")
+        scale = float(scale)
+        determine_coeff = int(determine_coeff)
+
+        logger.section("[SmartPlace-AutoSearch] Start auto candidate area search")
+
+        # 调用自动搜索接口（参数优先级：显式 > 配置文件 > 默认值）
+        search_result = auto_candidate_area_search(
+            background=background,
+            foreground=foreground,
+            scorer=scorer,
+            n=int(auto_coarse_n),
+            m=int(auto_coarse_m),
+            r=int(auto_samples_per_cell),
+            a=int(auto_fine_a),
+            b=int(auto_fine_b),
+            determine_coeff=determine_coeff,
+            scale=scale,
+            logger=logger,
+        )
+
+        best = search_result.get("best")
+        top_k = search_result.get("top_k", [])
+        summary = search_result.get("search_summary", {})
+
+        if best is None:
+            raise gr.Error("自动搜索未找到有效位置，请检查前景/背景是否已加载。")
+
+        best_x = int(best["x"])
+        best_y = int(best["y"])
+        best_score = best["score"]
+
+        logger.log(f"[AutoSearch] Best position: x={best_x}, y={best_y}, score={best_score:.6f}")
+
+        # 重建画布，将前景移到最优位置
+        iframe_html = _build_drag_canvas_html(background, foreground, scale, best_x, best_y)
+
+        # 将 top_k 全部加入候选列表（画布只呈现 #1 位置）
+        candidate_points = list(candidate_points or [])
+        existing_count = len(candidate_points)
+
+        for idx, item in enumerate(top_k):
+            cid = existing_count + idx + 1
+            candidate_points.append({
+                "id": cid,
+                "x": int(item["x"]),
+                "y": int(item["y"]),
+                "scale": scale,
+            })
+
+        candidate_df = pd.DataFrame([
+            {"候选编号": p["id"], "x": p["x"], "y": p["y"], "scale": p["scale"]}
+            for p in candidate_points
+        ])
+
+        drag_mode = (
+            f"自动搜索完成：粗搜索 {summary.get('coarse_grid', '?')} → "
+            f"细搜索 {summary.get('fine_grid', '?')}，"
+            f"determine_coeff={determine_coeff}，"
+            f"最优位置=({best_x}, {best_y})，分数={best_score:.4f}。"
+            f"已将 Top-{len(top_k)} 结果加入候选列表。"
+        )
+
+        return (
+            iframe_html,
+            candidate_points,
+            candidate_df,
+            str(best_x),
+            str(best_y),
+            str(scale),
+            drag_mode,
+        )
+
+def _build_drag_canvas_html(background, foreground_rgba, scale, init_x, init_y):
+    """
+    构建拖拽画布 iframe HTML，前景初始位置为 (init_x, init_y)。
+    供 prepare_drag_canvas 和 run_auto_search 共用。
+    """
+    bg_w, bg_h = background.size
+
+    resized_fg = resize_foreground(
+        foreground=foreground_rgba,
+        scale=float(scale),
+        bg_width=bg_w,
+        bg_height=bg_h,
+    )
+    fg_w, fg_h = resized_fg.size
+
+    canvas_scale = min(980 / bg_w, 680 / bg_h, 1.0)
+    canvas_w = int(bg_w * canvas_scale)
+    canvas_h = int(bg_h * canvas_scale)
+    display_fg_w = int(fg_w * canvas_scale)
+    display_fg_h = int(fg_h * canvas_scale)
+
+    bg_url = pil_to_data_url(background)
+    fg_url = pil_to_data_url(resized_fg)
+
+    srcdoc = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {{
+        --ink: #172033;
+        --muted: #708099;
+        --line: rgba(148, 163, 184, 0.26);
+        --primary: #5b8def;
+        --primary2: #77c8e8;
+        --panel: rgba(255,255,255,0.78);
+      }}
+      html, body {{
+        margin: 0;
+        padding: 0;
+        background:
+          radial-gradient(circle at 8% 0%, rgba(119, 200, 232, 0.22), transparent 32%),
+          linear-gradient(180deg, #f8fbff, #f3f6fb);
+        font-family: Inter, Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+        color: var(--ink);
+      }}
+      .panel {{
+        box-sizing: border-box;
+        border: 1px solid rgba(255,255,255,0.78);
+        padding: 24px;
+        border-radius: 24px;
+        background: linear-gradient(145deg, rgba(255,255,255,0.86), rgba(255,255,255,0.58));
+        box-shadow: 0 18px 44px rgba(31,41,55,0.10);
+        backdrop-filter: blur(16px) saturate(130%);
+      }}
+      .titlebar {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 16px;
+      }}
+      .title {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 820;
+        letter-spacing: -0.02em;
+      }}
+      .title::before {{
+        content: "";
+        width: 12px;
+        height: 12px;
+        border-radius: 999px;
+        background: linear-gradient(135deg, var(--primary), var(--primary2));
+        box-shadow: 0 0 0 6px rgba(91,141,239,0.10);
+      }}
+      .tips {{
+        font-size: 14px;
+        color: var(--muted);
+        line-height: 1.65;
+        margin-bottom: 18px;
+      }}
+      #stage {{
+        position: relative;
+        width: {canvas_w}px;
+        height: {canvas_h}px;
+        max-width: 100%;
+        border: 1px solid rgba(148,163,184,0.30);
+        border-radius: 20px;
+        background: #fff;
+        overflow: hidden;
+        user-select: none;
+        touch-action: none;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.90), 0 16px 34px rgba(31,41,55,0.08);
+      }}
+      #stage::after {{
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.35);
+        border-radius: 20px;
+      }}
+      #bg {{
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: {canvas_w}px;
+        height: {canvas_h}px;
+        pointer-events: none;
+      }}
+      #fg {{
+        position: absolute;
+        left: {int(init_x * canvas_scale)}px;
+        top: {int(init_y * canvas_scale)}px;
+        width: {display_fg_w}px;
+        height: {display_fg_h}px;
+        cursor: grab;
+        touch-action: none;
+        filter: drop-shadow(0 16px 22px rgba(15,23,42,0.16));
+      }}
+      #box {{
+        position: absolute;
+        left: {int(init_x * canvas_scale)}px;
+        top: {int(init_y * canvas_scale)}px;
+        width: {display_fg_w}px;
+        height: {display_fg_h}px;
+        border: 2px solid rgba(91,141,239,0.92);
+        border-radius: 14px;
+        box-sizing: border-box;
+        pointer-events: none;
+        box-shadow: 0 0 0 5px rgba(91,141,239,0.14), 0 0 24px rgba(119,200,232,0.22);
+      }}
+      #status {{
+        font-size: 14px;
+        color: #465772;
+        margin-top: 12px;
+        padding: 13px 14px;
+        border-radius: 16px;
+        background: rgba(255,255,255,0.70);
+        border: 1px solid rgba(148,163,184,0.18);
+      }}
+    </style>
+    </head>
+    <body>
+    <div class="panel">
+      <div class="title">拖拽交互画布</div>
+      <div class="tips">
+        操作：鼠标按住物体拖动；也可以点击背景中的任意位置，将物体中心移动到该处。
+        调整好位置后，点击页面下方"记录当前拖拽位置为候选"。
+      </div>
+
+      <div id="stage">
+        <img id="bg" src="{bg_url}" />
+        <img id="fg" src="{fg_url}" />
+        <div id="box"></div>
+      </div>
+
+      <div id="status">当前位置：x={init_x}, y={init_y}, scale={float(scale):.3f}</div>
+    </div>
+
+    <script>
+    (function() {{
+      const stage = document.getElementById("stage");
+      const fg = document.getElementById("fg");
+      const box = document.getElementById("box");
+      const status = document.getElementById("status");
+
+      const canvasScale = {canvas_scale};
+      const stageW = {canvas_w};
+      const stageH = {canvas_h};
+      const fgW = {display_fg_w};
+      const fgH = {display_fg_h};
+      const originalFgW = {fg_w};
+      const originalFgH = {fg_h};
+      const currentScale = {float(scale)};
+
+      let x = {int(init_x * canvas_scale)};
+      let y = {int(init_y * canvas_scale)};
+      let dragging = false;
+      let offsetX = 0;
+      let offsetY = 0;
+
+      window.smartplaceLocalDragState = {{
+        x: Math.round(x / canvasScale),
+        y: Math.round(y / canvasScale),
+        scale: currentScale
+      }};
+      window.getSmartPlaceDragState = function() {{
+        return window.smartplaceLocalDragState;
+      }};
+
+      function findInputInParent(elemId) {{
+        try {{
+          const root = parent.document.getElementById(elemId);
+          if (!root) return null;
+          return root.querySelector("textarea, input");
+        }} catch (e) {{
+          return null;
+        }}
+      }}
+
+      function setParentValue(elemId, value) {{
+        const input = findInputInParent(elemId);
+        if (!input) return;
+        input.value = String(value);
+        input.dispatchEvent(new Event("input", {{ bubbles: true }}));
+        input.dispatchEvent(new Event("change", {{ bubbles: true }}));
+      }}
+
+      function clamp() {{
+        x = Math.max(0, Math.min(stageW - fgW, x));
+        y = Math.max(0, Math.min(stageH - fgH, y));
+      }}
+
+      function update() {{
+        clamp();
+
+        fg.style.left = x + "px";
+        fg.style.top = y + "px";
+        box.style.left = x + "px";
+        box.style.top = y + "px";
+
+        const ox = Math.round(x / canvasScale);
+        const oy = Math.round(y / canvasScale);
+
+        setParentValue("drag_x_input", ox);
+        setParentValue("drag_y_input", oy);
+        setParentValue("drag_scale_input", currentScale);
+
+        window.smartplaceLocalDragState = {{
+          x: ox,
+          y: oy,
+          scale: currentScale
+        }};
+
+        try {{
+          parent.postMessage({{
+            type: "smartplace-drag-update",
+            x: ox,
+            y: oy,
+            scale: currentScale
+          }}, "*");
+        }} catch (e) {{}}
+
+        status.innerText =
+          "当前位置：x=" + ox +
+          ", y=" + oy +
+          ", scale=" + currentScale.toFixed(3) +
+          "；物体尺寸≈" + originalFgW + "×" + originalFgH;
+      }}
+
+      function pointerPosition(evt) {{
+        const rect = stage.getBoundingClientRect();
+        const sx = stageW / rect.width;
+        const sy = stageH / rect.height;
+        return {{
+          x: (evt.clientX - rect.left) * sx,
+          y: (evt.clientY - rect.top) * sy
+        }};
+      }}
+
+      stage.addEventListener("pointerdown", function(evt) {{
+        const p = pointerPosition(evt);
+
+        const inside =
+          p.x >= x && p.x <= x + fgW &&
+          p.y >= y && p.y <= y + fgH;
+
+        if (inside) {{
+          offsetX = p.x - x;
+          offsetY = p.y - y;
+        }} else {{
+          x = p.x - fgW / 2;
+          y = p.y - fgH / 2;
+          offsetX = fgW / 2;
+          offsetY = fgH / 2;
+        }}
+
+        dragging = true;
+        stage.setPointerCapture(evt.pointerId);
+        fg.style.cursor = "grabbing";
+        update();
+        evt.preventDefault();
+      }});
+
+      stage.addEventListener("pointermove", function(evt) {{
+        if (!dragging) return;
+        const p = pointerPosition(evt);
+        x = p.x - offsetX;
+        y = p.y - offsetY;
+        update();
+        evt.preventDefault();
+      }});
+
+      stage.addEventListener("pointerup", function(evt) {{
+        dragging = false;
+        fg.style.cursor = "grab";
+        update();
+        evt.preventDefault();
+      }});
+
+      stage.addEventListener("pointercancel", function(evt) {{
+        dragging = false;
+        fg.style.cursor = "grab";
+        update();
+      }});
+
+      update();
+    }})();
+    </script>
+    </body>
+    </html>
+    """
+
+    iframe_html = f"""
+    <iframe
+      id="smartplace_drag_iframe"
+      srcdoc="{html_lib.escape(srcdoc, quote=True)}"
+      style="width:100%; height:{canvas_h + 190}px; border:0; border-radius:28px; background:transparent; box-shadow:0 24px 58px rgba(31,41,55,0.13);"
+    ></iframe>
+    """
+
+    return iframe_html
+
 
 
 def as_enabled(value) -> bool:
@@ -1789,6 +1887,8 @@ with gr.Blocks(
                             add_candidate_button = gr.Button("记录当前位置为候选", variant="primary", elem_classes=["sp-blue"])
                         with gr.Row():
                             clear_candidate_button = gr.Button("清空候选", variant="primary", elem_classes=["sp-blue"])
+                            auto_search_button = gr.Button("🔍 自动搜索最优位置", variant="primary", elem_classes=["sp-green"])
+                        with gr.Row():
                             score_button = gr.Button("批量评分并生成结果", variant="primary", elem_classes=["sp-blue"])
 
                     with gr.Row(equal_height=False):
@@ -1824,6 +1924,17 @@ with gr.Blocks(
                         )
                         scale_input = gr.Slider(minimum=0.05, maximum=0.8, value=0.25, step=0.05, label="前景缩放比例", buttons=[])
                         top_k_input = gr.Slider(minimum=1, maximum=5, value=3, step=1, label="Top-K 数量", buttons=[])
+                        with gr.Accordion("自动搜索参数", open=True):
+                            determine_coeff_input = gr.Slider(
+                                minimum=1, maximum=5, value=1, step=1,
+                                label="筛选网格数 (determine_coeff)",
+                                buttons=[],
+                            )
+                            auto_coarse_n_input = gr.Slider(minimum=2, maximum=8, value=4, step=1, label="粗搜索行数", buttons=[])
+                            auto_coarse_m_input = gr.Slider(minimum=2, maximum=8, value=4, step=1, label="粗搜索列数", buttons=[])
+                            auto_samples_per_cell_input = gr.Slider(minimum=1, maximum=8, value=3, step=1, label="每格采样点数", buttons=[])
+                            auto_fine_a_input = gr.Slider(minimum=2, maximum=10, value=5, step=1, label="细搜索行数", buttons=[])
+                            auto_fine_b_input = gr.Slider(minimum=2, maximum=10, value=5, step=1, label="细搜索列数", buttons=[])
                         filter_out_of_bounds_input = gr.Radio(choices=["ON", "OFF"], value="ON", label="过滤越界候选", interactive=True)
                         enable_explanation_input = gr.Radio(choices=["OFF", "ON"], value="OFF", label="生成遮挡实验热力图（慢）", interactive=True)
                         enable_saliency_input = gr.Radio(choices=["OFF", "ON"], value="OFF", label="生成梯度显著性图", interactive=True)
@@ -1918,6 +2029,32 @@ with gr.Blocks(
         fn=clear_candidates,
         inputs=[],
         outputs=[candidate_points_state, candidate_points_table],
+    )
+
+    auto_search_button.click(
+        fn=run_auto_search,
+        inputs=[
+            bg_state,
+            fg_state,
+            mask_info_state,
+            candidate_points_state,
+            scale_input,
+            determine_coeff_input,
+            auto_coarse_n_input,
+            auto_coarse_m_input,
+            auto_samples_per_cell_input,
+            auto_fine_a_input,
+            auto_fine_b_input,
+        ],
+        outputs=[
+            drag_canvas_html,
+            candidate_points_state,
+            candidate_points_table,
+            drag_x_input,
+            drag_y_input,
+            drag_scale_input,
+            drag_mode_state,
+        ],
     )
 
     score_button.click(

@@ -40,3 +40,19 @@ output:
   save_csv: true
   save_log: true
   save_mask: true
+
+auto_search:
+  coarse_n: 4
+  coarse_m: 4
+  samples_per_cell: 3
+  fine_a: 5
+  fine_b: 5
+  determine_coeff: 1
+  scale: 0.25
+  margin_ratio: 0.08
+  allow_out_of_bounds: false
+  filter_out_of_bounds: true
+  batch_size: 32
+  seed: 42
+  mask_mode: 自动判断
+  white_bg_threshold: 38
