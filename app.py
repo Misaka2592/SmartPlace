@@ -940,7 +940,13 @@ def build_run_analysis_text(summary: Dict[str, Any], ranked: List[Dict[str, Any]
         lines.append(f"结论：{item.get('conclusion', '')}")
         lines.append("")
     lines.append("【评分点说明】")
-    lines.append("复杂交互：用户可以在浏览器画布中直接拖动前景物体，并将拖拽位置记录为候选位置。")
+    lines.append(
+        "复杂交互："
+        "一、用户可以在浏览器画布中直接拖动前景物体，并将拖拽位置记录为候选位置。"
+        "二、用户可以在画布中缩放前景物体，可以实时观察位置变化。"
+        "三、用户可以选择自动候选搜索，系统会自动根据当前指定的参数搜索寻找近似最合理的候选位置。"
+        "四、当用户的操作非法或用户提交的背景无可用位置时，系统会提示用户。"
+    )
     lines.append("参考模型评分：系统将拖拽候选合成为 composite image + composite mask，并调用 libcom OPAScoreModel 批量评分。")
     lines.append("多工具串联：前景 mask 处理 → 拖拽候选记录 → 图像合成 → OPA 评分 → Top-K 推荐 → 导出结果。")
     if explanation_text:
