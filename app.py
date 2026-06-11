@@ -11,15 +11,11 @@ import gradio as gr
 import pandas as pd
 import yaml
 from PIL import Image
+from typing import Optional
 
 from models.libcom_opa_subprocess_scorer import LibcomOPASubprocessScorer
 from models.smartplace_opa_calibrated_scorer import SmartPlaceOPACalibratedScorer
 from models.libcom_multimodel_subprocess import LibcomMultiModelSubprocess
-from models.libcom_opa_subprocess_scorer import LibcomOPASubprocessScorer
-from models.smartplace_opa_calibrated_scorer import SmartPlaceOPACalibratedScorer
-from models.libcom_multimodel_subprocess import LibcomMultiModelSubprocess
-from models.dummy_scorer import DummyScorer
-from utils.composer import compose_image_with_mask, resize_foreground
 from utils.scoring import format_score, analyze_candidate, summarize_run
 from utils.logger import InferenceLogger
 from utils.exporter import export_markdown_report, export_result_package_metadata
@@ -40,13 +36,19 @@ from utils.case_manager import (
 )
 from utils.auto_candidate_area_search import auto_candidate_area_search
 from utils.composer import compose_image_with_mask, resize_foreground
+from utils.image_warnings import (
+    check_foreground_size,
+    check_background_quality,
+    check_no_candidates,
+    collect_run_warnings,
+)
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
-def collect_preset_images(folder: str, limit: int = 6) -> List[str]:
+def collect_preset_images(folder: str) -> List[str]:
     exts = (".png", ".jpg", ".jpeg", ".webp")
     if not os.path.isdir(folder):
         return []
@@ -55,7 +57,7 @@ def collect_preset_images(folder: str, limit: int = 6) -> List[str]:
         for name in sorted(os.listdir(folder))
         if name.lower().endswith(exts)
     ]
-    return files[:limit]
+    return files if files else [""]
 
 
 CUSTOM_DRAG_JS = """
@@ -903,7 +905,7 @@ def build_model_info_text() -> str:
     return "\n".join(lines)
 
 
-def build_run_analysis_text(summary: Dict[str, Any], ranked: List[Dict[str, Any]], mask_info: Dict[str, Any], drag_mode: str, explanation_text: str = "") -> str:
+def build_run_analysis_text(summary: Dict[str, Any], ranked: List[Dict[str, Any]], mask_info: Dict[str, Any], drag_mode: str, explanation_text: str = "", run_warnings: List[str] = None) -> str:
     lines = []
     lines.append("【本次运行统计】")
     lines.append(f"候选总数：{summary['total_candidates']}")
@@ -944,6 +946,11 @@ def build_run_analysis_text(summary: Dict[str, Any], ranked: List[Dict[str, Any]
     if explanation_text:
         lines.append("")
         lines.append(explanation_text)
+    if run_warnings:
+        lines.append("")
+        lines.append("【⚠ 输入警告】")
+        for w in run_warnings:
+            lines.append(f"- {w}")
     return "\n".join(lines)
 
 
@@ -975,6 +982,10 @@ def prepare_drag_canvas(background_image, foreground_image, mask_mode, white_bg_
 
     background = Image.fromarray(background_image).convert("RGB")
     raw_foreground = Image.fromarray(foreground_image).convert("RGBA")
+
+    bg_quality_warn = check_background_quality(background)
+    if bg_quality_warn:
+        gr.Warning(bg_quality_warn)
 
     mask_cfg = cfg.get("mask_processor", {})
     foreground, mask_preview, mask_info = process_foreground_for_composition(
@@ -1051,6 +1062,27 @@ def add_current_candidate(candidate_points, drag_x, drag_y, drag_scale):
 def clear_candidates():
     return [], pd.DataFrame(columns=["候选编号", "x", "y", "scale"])
 
+def on_background_change(background_image):
+    """
+    当用户上传或选择背景图时，立即检测是否为纯色/近纯色。
+    如果是，弹出错误提示，清空背景图，阻止后续加载画布。
+    """
+    logger.log(f"[DEBUG]Background image changed, checking quality...")
+    if background_image is None:
+        logger.log(f"[DEBUG]Background image is None, skip quality check.")
+        return background_image
+
+    background = Image.fromarray(background_image).convert("RGB")
+    logger.log(f"[DEBUG]Background image quality check triggered.")
+    bg_warn = check_background_quality(background)
+
+    if bg_warn:
+        logger.log(f"[DEBUG]Background image quality warning: {bg_warn}")
+        gr.Warning(bg_warn)
+        return None
+    logger.log(f"[DEBUG]Background image quality passed.")
+    return background_image
+
 
 def run_auto_search(
         bg_state,
@@ -1097,7 +1129,8 @@ def run_auto_search(
     summary = search_result.get("search_summary", {})
 
     if best is None:
-        raise gr.Error("自动搜索未找到有效位置，请检查前景/背景是否已加载。")
+        no_cand_warn = check_no_candidates([])
+        raise gr.Error(no_cand_warn or "自动搜索未找到有效位置，请检查前景/背景是否已加载。")
 
     best_x = int(best["x"] or 0)
     best_y = int(best["y"] or 0)
@@ -1149,7 +1182,7 @@ def run_auto_search(
     )
 
 
-def _build_drag_canvas_html(background, foreground_rgba, scale, init_x, init_y):
+def _build_drag_canvas_html(background, foreground_rgba, scale, init_x, init_y, bg_warning:Optional[str]=None):
     """
     构建拖拽画布 iframe HTML，前景初始位置为 (init_x, init_y)。
     供 prepare_drag_canvas 和 run_auto_search 共用。
@@ -1292,6 +1325,7 @@ def _build_drag_canvas_html(background, foreground_rgba, scale, init_x, init_y):
         border-radius: 16px;
         background: rgba(255,255,255,0.70);
         border: 1px solid rgba(148,163,184,0.18);
+        transition: background 0.3s ease, border-color 0.3s ease;
       }}
     </style>
     </head>
@@ -1365,6 +1399,31 @@ def _build_drag_canvas_html(background, foreground_rgba, scale, init_x, init_y):
         x = Math.max(0, Math.min(stageW - fgW, x));
         y = Math.max(0, Math.min(stageH - fgH, y));
       }}
+      
+      function checkPlacementNaturality(ox, oy, fgW, fgH, bgW, bgH) {{
+            const bottomY = oy + fgH;
+            const bottomRatio = bottomY / bgH;
+            const centerX = ox + fgW / 2;
+            const centerXRatio = centerX / bgW;
+            let hints = [];
+
+            // 悬空检测：物体底部远高于画面底部
+            if (bottomRatio < 0.45) {{
+              hints.push("物体悬空，建议放在靠近地面的位置");
+            }}
+
+            // 过于靠近边缘
+            if (centerXRatio < 0.12 || centerXRatio > 0.88) {{
+              hints.push("物体过于靠边");
+            }}
+
+            // 越界检测
+            if (ox < 0 || oy < 0 || ox + fgW > bgW || oy + fgH > bgH) {{
+              hints.push("物体越出画面边界");
+            }}
+
+            return hints;
+          }}
 
       function update() {{
         clamp();
@@ -1395,14 +1454,25 @@ def _build_drag_canvas_html(background, foreground_rgba, scale, init_x, init_y):
             scale: currentScale
           }}, "*");
         }} catch (e) {{}}
+        
+        const hints = checkPlacementNaturality(
+              ox, oy, originalFgW, originalFgH, stageW / canvasScale, stageH / canvasScale
+            );
 
-        status.innerText =
-          "当前位置：x=" + ox +
-          ", y=" + oy +
-          ", scale=" + currentScale.toFixed(3) +
-          "；物体尺寸≈" + originalFgW + "×" + originalFgH;
+            let statusText = "当前位置：x=" + ox + ", y=" + oy + ", scale=" + currentScale.toFixed(3);
+
+            if (hints.length > 0) {{
+              statusText += "  ⚠ " + hints.join("；");
+              status.style.borderColor = "rgba(224,122,122,0.50)";
+              status.style.background = "rgba(255,245,245,0.85)";
+            }} else {{
+              status.style.borderColor = "rgba(148,163,184,0.18)";
+              status.style.background = "rgba(255,255,255,0.70)";
+            }}
+
+        status.innerText = statusText + "；物体尺寸≈" + originalFgW + "×" + originalFgH;
       }}
-
+      
       function pointerPosition(evt) {{
         const rect = stage.getBoundingClientRect();
         const sx = stageW / rect.width;
@@ -1541,6 +1611,25 @@ def score_drag_candidates(
     candidate_infos = []
     candidates = []
 
+    resized_fg_for_check = resize_foreground(
+        foreground, scale=float(candidate_points[0]["scale"]),
+        bg_width=background.size[0], bg_height=background.size[1],
+    ) if candidate_points else None
+
+    if resized_fg_for_check is not None:
+        run_warnings = collect_run_warnings(
+            fg_width=resized_fg_for_check.size[0],
+            fg_height=resized_fg_for_check.size[1],
+            bg_width=background.size[0],
+            bg_height=background.size[1],
+            candidates=None,  # 候选还没合成，暂不检测空候选
+        )
+    else:
+        run_warnings = collect_run_warnings(
+            fg_width=0, fg_height=0,
+            bg_width=background.size[0], bg_height=background.size[1],
+        )
+
     for p in candidate_points:
         composite, composite_mask, info = compose_image_with_mask(
             background=background,
@@ -1584,6 +1673,15 @@ def score_drag_candidates(
             "saved_path": None,
         }
         results.append(result)
+
+    if not results:
+        no_cand_warn = check_no_candidates([])
+        if no_cand_warn and no_cand_warn not in run_warnings:
+            run_warnings.append(no_cand_warn)
+    if run_warnings:
+        logger.section("[SmartPlace-Drag] Run Warnings")
+        for w in run_warnings:
+            logger.log(f"[Warning] {w}")
 
     ranked_all = assign_relative_labels_in_place(results, top_k=top_k)
     ranked = ranked_all[:top_k]
@@ -1699,6 +1797,7 @@ def score_drag_candidates(
         mask_info=mask_info,
         drag_mode=drag_mode_state or "用户拖拽前景物体并记录候选位置。",
         explanation_text=explanation_text,
+        run_warnings=run_warnings if run_warnings else None,
     )
 
     model_info = scorer.get_model_info()
@@ -1716,6 +1815,7 @@ def score_drag_candidates(
         log_path=log_path,
         explanation_path=explanation_overlay_path,
         explanation_report_path=explanation_report_path,
+        run_warnings=run_warnings if run_warnings else None,
     )
 
     metadata_path = export_result_package_metadata(
@@ -1801,8 +1901,8 @@ with gr.Blocks(
     title="SmartPlace Studio · 智能物体放置展示平台",
     fill_width=True,
 ) as demo:
-    preset_foregrounds = collect_preset_images(os.path.join("assets", "foregrounds"), limit=6)
-    preset_backgrounds = collect_preset_images(os.path.join("assets", "backgrounds"), limit=6)
+    preset_foregrounds = collect_preset_images(os.path.join("assets", "foregrounds"))
+    preset_backgrounds = collect_preset_images(os.path.join("assets", "backgrounds"))
     bg_state = gr.State(value=None)
     fg_state = gr.State(value=None)
     mask_info_state = gr.State(value={})
@@ -1882,11 +1982,18 @@ with gr.Blocks(
                         )
                         gr.HTML("<div class='sp-section-title'>背景图片区域</div><div class='sp-subtitle'>预制背景图片 / 本地上传</div>")
                         background_input = gr.Image(label="背景图 Background", type="numpy", height=240)
+                        background_input.change(
+                            fn=on_background_change,
+                            inputs=[background_input],
+                            outputs=[background_input],
+                            trigger_mode="once",
+                        )
                         gr.Examples(
                             examples=preset_backgrounds,
                             inputs=background_input,
                             label="预制背景图片",
                         )
+
 
                     case_name_input = gr.State("SmartPlace 工作台案例")
                     background_note_input = gr.State("")
