@@ -183,5 +183,3 @@ git clone https://github.com/bcmi/libcom.git third_party/libcom
 ```text
 检查 assets/foregrounds/ 和 assets/backgrounds/ 中是否真的有图片文件。
 ```
-
-

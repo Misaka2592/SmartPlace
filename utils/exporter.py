@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -26,21 +26,22 @@ def export_json(data: Dict, output_dir: str, prefix: str = "analysis") -> str:
 
 
 def export_markdown_report(
-    results: List[Dict],
-    ranked: List[Dict],
-    summary: Dict,
-    model_info: Dict,
-    output_dir: str,
-    csv_path: str,
-    log_path: str,
-    explanation_path: str = None,
-    explanation_report_path: str = None,
+        results: List[Dict],
+        ranked: List[Dict],
+        summary: Dict,
+        model_info: Dict,
+        output_dir: str,
+        csv_path: str,
+        log_path: str,
+        explanation_path: str = None,
+        explanation_report_path: str = None,
+        run_warnings: Optional[List[str]] = None,
 ) -> str:
     """
     导出一次运行的 Markdown 分析报告。
 
     这个报告可以直接放到 report/results/ 或 README 中，
-    作为“模型小改动、批量排序、Top-K 推荐、本地推理证据”的材料。
+    作为"模型小改动、批量排序、Top-K 推荐、本地推理证据"的材料。
     """
     ensure_dir(output_dir)
 
@@ -51,6 +52,13 @@ def export_markdown_report(
 
     lines.append("# SmartPlace 单次运行分析报告\n")
     lines.append(f"生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+    # --- 图像级警告（如有） ---
+    if run_warnings:
+        lines.append("## ⚠ 图像与输入警告\n")
+        for w in run_warnings:
+            lines.append(f"- {w}")
+        lines.append("")
 
     lines.append("## 1. 模型信息\n")
     lines.append(f"- 模型名称：{model_info.get('model_name')}")
@@ -66,8 +74,11 @@ def export_markdown_report(
     lines.append(f"- 可接受数量：{summary.get('acceptable_count')}")
     lines.append(f"- 不推荐数量：{summary.get('not_recommend_count')}")
     lines.append(f"- 最佳候选编号：{summary.get('best_candidate_id')}")
-    lines.append(f"- 最佳候选分数：{summary.get('best_score'):.4f}")
-    lines.append(f"- 平均分数：{summary.get('average_score'):.4f}\n")
+    best_score = summary.get('best_score')
+    lines.append(f"- 最佳候选分数：{best_score:.4f}" if best_score is not None else "- 最佳候选分数：N/A")
+    avg_score = summary.get('average_score')
+    lines.append(f"- 平均分数：{avg_score:.4f}" if avg_score is not None else "- 平均分数：N/A")
+    lines.append("")
 
     lines.append("## 3. 基础模型小改动说明\n")
     lines.append(
@@ -155,14 +166,15 @@ def export_markdown_report(
 
 
 def export_result_package_metadata(
-    results: List[Dict],
-    ranked: List[Dict],
-    summary: Dict,
-    model_info: Dict,
-    output_dir: str,
-    csv_path: str,
-    log_path: str,
-    report_path: str,
+        results: List[Dict],
+        ranked: List[Dict],
+        summary: Dict,
+        model_info: Dict,
+        output_dir: str,
+        csv_path: str,
+        log_path: str,
+        report_path: str,
+        run_warnings: Optional[List[str]] = None,
 ) -> str:
     """
     导出完整元信息 JSON。
@@ -198,5 +210,8 @@ def export_result_package_metadata(
             "report_path": report_path,
         },
     }
+
+    if run_warnings:
+        data["run_warnings"] = run_warnings
 
     return export_json(data=data, output_dir=output_dir, prefix="smartplace_metadata")

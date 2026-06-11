@@ -11,12 +11,15 @@ import gradio as gr
 import pandas as pd
 import yaml
 from PIL import Image
+from typing import Optional
+
+from utils.config import load_config
+from utils.zip_folder import zip_folder
 
 from models.libcom_opa_subprocess_scorer import LibcomOPASubprocessScorer
 from models.handin_opa_subprocess_scorer import HandinOPASubprocessScorer
 from models.smartplace_opa_calibrated_scorer import SmartPlaceOPACalibratedScorer
 from models.libcom_multimodel_subprocess import LibcomMultiModelSubprocess
-from utils.composer import compose_image_with_mask, resize_foreground
 from utils.scoring import format_score, analyze_candidate, summarize_run
 from utils.logger import InferenceLogger
 from utils.exporter import export_markdown_report, export_result_package_metadata
@@ -36,9 +39,21 @@ from utils.case_manager import (
     export_case_summary_csv,
     export_case_summary_markdown,
 )
+from utils.auto_candidate_area_search import auto_candidate_area_search
+from utils.composer import compose_image_with_mask, resize_foreground
+from utils.image_warnings import (
+    check_foreground_size,
+    check_background_quality,
+    check_no_candidates,
+    collect_run_warnings,
+)
+
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
-def collect_preset_images(folder: str, limit: int = 6) -> List[str]:
+def collect_preset_images(folder: str) -> List[str]:
     exts = (".png", ".jpg", ".jpeg", ".webp")
     if not os.path.isdir(folder):
         return []
@@ -47,7 +62,17 @@ def collect_preset_images(folder: str, limit: int = 6) -> List[str]:
         for name in sorted(os.listdir(folder))
         if name.lower().endswith(exts)
     ]
-    return files[:limit]
+    return files if files else [""]
+
+
+def format_param_value(value: Any, digits: int = 0) -> str:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if digits <= 0:
+        return str(int(round(num)))
+    return f"{num:.{digits}f}"
 
 
 def format_param_value(value: Any, digits: int = 0) -> str:
@@ -819,30 +844,46 @@ label, .label-wrap span { color: #4f6484 !important; font-weight: 680 !important
 }
 """
 
-OUTPUT_DIR = "outputs"
+ROOT_DIR = os.path.dirname(__file__)
+OUTPUT_DIR = os.path.join(ROOT_DIR, "outputs")
 COMPOSITE_DIR = os.path.join(OUTPUT_DIR, "composites")
 TABLE_DIR = os.path.join(OUTPUT_DIR, "tables")
 LOG_DIR = os.path.join(OUTPUT_DIR, "logs")
 EXPLAIN_DIR = os.path.join(OUTPUT_DIR, "explanations")
 MASK_DIR = os.path.join(OUTPUT_DIR, "masks")
-REPORT_RESULT_DIR = os.path.join("report", "results")
-CASE_DIR = os.path.join("report", "cases")
+TEMP_DIR_HANDIN = os.path.join(OUTPUT_DIR, "handin_subprocess")
+TEMP_DIR_LIBCOM = os.path.join(OUTPUT_DIR, "libcom_subprocess")
+TEMP_DIR_LIBCOM_MULTI = os.path.join(OUTPUT_DIR, "libcom_multimodel")
+REPORT_DIR = os.path.join(ROOT_DIR, "report")
+REPORT_RESULT_DIR = os.path.join(REPORT_DIR, "results")
+CASE_DIR = os.path.join(REPORT_DIR, "cases")
+CONFIG_DIR = os.path.join(ROOT_DIR, "configs")
 
-CONFIG_PATH = "configs/default.yaml"
+CONFIG_PATH = os.path.join(CONFIG_DIR, "default.yaml")
+
+HANDIN_DIR = os.path.join(ROOT_DIR, "handin")
+HANDIN_PYTHON_PATH = os.path.join(HANDIN_DIR, ".venv", "Scripts", "python.exe")
+
+LIBCOM_DIR = os.path.join(ROOT_DIR, ".venv_libcom")
+LIBCOM_PYTHON_PATH = os.path.join(LIBCOM_DIR, "Scripts", "python.exe")
+
+SCRIPT_DIR = os.path.join(ROOT_DIR, "scripts")
+SCRIPT_PATH_HANDIN = os.path.join(SCRIPT_DIR, "handin_opa_infer_once.py")
+SCRIPT_PATH_LIBCOM = os.path.join(ROOT_DIR, "libcom_opa_infer_once.py")
+BATCH_SCRIPT_PATH_HANDIN = os.path.join(SCRIPT_DIR, "handin_opa_infer_batch.py")
+BATCH_SCRIPT_PATH_LIBCOM = os.path.join(SCRIPT_DIR, "libcom_opa_infer_batch.py")
+MULTI_SCRIPT_PATH_LIBCOM = os.path.join(SCRIPT_DIR, "libcom_multi_model_infer.py")
 
 for path in [COMPOSITE_DIR, TABLE_DIR, LOG_DIR, EXPLAIN_DIR, MASK_DIR, REPORT_RESULT_DIR, CASE_DIR]:
     os.makedirs(path, exist_ok=True)
 
 
-def load_config(config_path: str = CONFIG_PATH) -> Dict[str, Any]:
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+
 
 
 cfg = load_config()
 logger = InferenceLogger(log_dir=LOG_DIR, enable_file_log=cfg.get("output", {}).get("save_log", True))
+logger.log(f"[DEBUG] ROOT_DIR: {ROOT_DIR}")
 
 scorer_cfg = cfg.get("scorer", {})
 active_backend = scorer_cfg.get("active_backend", "handin_opa_subprocess")
@@ -855,27 +896,27 @@ def _build_calibrated_scorer(backend_key: str) -> SmartPlaceOPACalibratedScorer:
     if backend_key == "handin_opa_subprocess":
         handin_cfg = scorer_cfg.get("handin_opa_subprocess", {})
         base_scorer = HandinOPASubprocessScorer(
-            python_path=handin_cfg.get("python_path", "../handin/.venv/Scripts/python.exe"),
-            script_path=handin_cfg.get("script_path", "scripts/handin_opa_infer_once.py"),
-            batch_script_path=handin_cfg.get("batch_script_path", "scripts/handin_opa_infer_batch.py"),
-            handin_root=handin_cfg.get("handin_root", "../handin"),
-            weight_path=handin_cfg.get("weight_path", "../handin/experiments/ablation_study/resnet18_w05_20260609_161229/checkpoints/resnet18_w05_best-acc-0.718_epoch15_f1-0.614.pth"),
+            python_path=handin_cfg.get("python_path", HANDIN_PYTHON_PATH),
+            script_path=handin_cfg.get("script_path", SCRIPT_PATH_HANDIN),
+            batch_script_path=handin_cfg.get("batch_script_path", BATCH_SCRIPT_PATH_HANDIN),
+            handin_root=handin_cfg.get("handin_root", HANDIN_DIR),
+            weight_path=handin_cfg.get("weight_path", os.path.join(HANDIN_DIR,"experiments/ablation_study/resnet18_w05_20260609_161229/checkpoints/resnet18_w05_best-acc-0.718_epoch15_f1-0.614.pth")),
             device=handin_cfg.get("device", "cpu"),
             model_name=handin_cfg.get("model_name", "resnet"),
             layers=handin_cfg.get("layers", 18),
             width_factor=handin_cfg.get("width_factor", 0.5),
-            temp_dir=handin_cfg.get("temp_dir", "outputs/handin_subprocess"),
+            temp_dir=handin_cfg.get("temp_dir", TEMP_DIR_HANDIN),
             timeout_seconds=handin_cfg.get("timeout_seconds", 120),
             logger=logger,
         )
     else:
         base_scorer = LibcomOPASubprocessScorer(
-            python_path=libcom_cfg.get("python_path", ".venv_libcom/Scripts/python.exe"),
-            script_path=libcom_cfg.get("script_path", "scripts/libcom_opa_infer_once.py"),
-            batch_script_path=libcom_cfg.get("batch_script_path", "scripts/libcom_opa_infer_batch.py"),
+            python_path=libcom_cfg.get("python_path", LIBCOM_PYTHON_PATH),
+            script_path=libcom_cfg.get("script_path", SCRIPT_PATH_LIBCOM),
+            batch_script_path=libcom_cfg.get("batch_script_path", BATCH_SCRIPT_PATH_LIBCOM),
             device=libcom_cfg.get("device", "cuda:0"),
             model_type=libcom_cfg.get("model_type", "SimOPA"),
-            temp_dir=libcom_cfg.get("temp_dir", "outputs/libcom_subprocess"),
+            temp_dir=libcom_cfg.get("temp_dir", TEMP_DIR_LIBCOM),
             timeout_seconds=libcom_cfg.get("timeout_seconds", 120),
             logger=logger,
         )
@@ -902,23 +943,23 @@ scorer = get_runtime_scorer(active_backend)
 
 multi_cfg = scorer_cfg.get("libcom_multimodel", {})
 libcom_multimodel = LibcomMultiModelSubprocess(
-    python_path=multi_cfg.get("python_path", libcom_cfg.get("python_path", ".venv_libcom/Scripts/python.exe")),
-    script_path=multi_cfg.get("script_path", "scripts/libcom_multi_model_infer.py"),
+    python_path=multi_cfg.get("python_path", libcom_cfg.get("python_path", LIBCOM_PYTHON_PATH)),
+    script_path=multi_cfg.get("script_path", MULTI_SCRIPT_PATH_LIBCOM),
     device=multi_cfg.get("device", libcom_cfg.get("device", "cuda:0")),
-    temp_dir=multi_cfg.get("temp_dir", "outputs/libcom_multimodel"),
+    temp_dir=multi_cfg.get("temp_dir", TEMP_DIR_LIBCOM_MULTI),
     logger=logger,
 )
 
 u2net_cfg = cfg.get("u2net", {})
 u2net_runner = HandinU2NetSubprocessMatting(
-    python_path=u2net_cfg.get("python_path", "../handin/.venv/Scripts/python.exe"),
-    script_path=u2net_cfg.get("script_path", "scripts/handin_u2net_infer_once.py"),
-    handin_root=u2net_cfg.get("handin_root", "../handin"),
+    python_path=u2net_cfg.get("python_path", HANDIN_PYTHON_PATH),
+    script_path=u2net_cfg.get("script_path", SCRIPT_PATH_HANDIN),
+    handin_root=u2net_cfg.get("handin_root", HANDIN_DIR),
     model_type=u2net_cfg.get("model_type", "u2netp"),
-    weight_path=u2net_cfg.get("weight_path", "../handin/u2netp.pth"),
+    weight_path=u2net_cfg.get("weight_path", os.path.join(HANDIN_DIR,"u2netp.pth")),
     device=u2net_cfg.get("device", "cpu"),
     threshold=u2net_cfg.get("threshold", 0.5),
-    temp_dir=u2net_cfg.get("temp_dir", "outputs/handin_u2net"),
+    temp_dir=u2net_cfg.get("temp_dir", TEMP_DIR_HANDIN),
     timeout_seconds=u2net_cfg.get("timeout_seconds", 120),
 )
 
@@ -1013,7 +1054,7 @@ def build_model_info_text() -> str:
     return "\n".join(lines)
 
 
-def build_run_analysis_text(summary: Dict[str, Any], ranked: List[Dict[str, Any]], mask_info: Dict[str, Any], drag_mode: str, explanation_text: str = "") -> str:
+def build_run_analysis_text(summary: Dict[str, Any], ranked: List[Dict[str, Any]], mask_info: Dict[str, Any], drag_mode: str, explanation_text: str = "", run_warnings: List[str] = None) -> str:
     lines = []
     lines.append("【本次运行统计】")
     lines.append(f"候选总数：{summary['total_candidates']}")
@@ -1048,12 +1089,23 @@ def build_run_analysis_text(summary: Dict[str, Any], ranked: List[Dict[str, Any]
         lines.append(f"结论：{item.get('conclusion', '')}")
         lines.append("")
     lines.append("【评分点说明】")
-    lines.append("复杂交互：用户可以在浏览器画布中直接拖动前景物体，并将拖拽位置记录为候选位置。")
+    lines.append(
+        "复杂交互："
+        "一、用户可以在浏览器画布中直接拖动前景物体，并将拖拽位置记录为候选位置。"
+        "二、用户可以在画布中缩放前景物体，可以实时观察位置变化。"
+        "三、用户可以选择自动候选搜索，系统会自动根据当前指定的参数搜索寻找近似最合理的候选位置。"
+        "四、当用户的操作非法或用户提交的背景无可用位置时，系统会提示用户。"
+    )
     lines.append("参考模型评分：系统将拖拽候选合成为 composite image + composite mask，并调用 libcom OPAScoreModel 批量评分。")
     lines.append("多工具串联：前景 mask 处理 → 拖拽候选记录 → 图像合成 → OPA 评分 → Top-K 推荐 → 导出结果。")
     if explanation_text:
         lines.append("")
         lines.append(explanation_text)
+    if run_warnings:
+        lines.append("")
+        lines.append("【⚠ 输入警告】")
+        for w in run_warnings:
+            lines.append(f"- {w}")
     return "\n".join(lines)
 
 
@@ -1086,6 +1138,10 @@ def prepare_drag_canvas(background_image, foreground_image, mask_mode, white_bg_
     background = Image.fromarray(background_image).convert("RGB")
     raw_foreground = Image.fromarray(foreground_image).convert("RGBA")
 
+    bg_quality_warn = check_background_quality(background)
+    if bg_quality_warn:
+        gr.Warning(bg_quality_warn)
+
     mask_cfg = cfg.get("mask_processor", {})
     foreground, mask_preview, mask_info = process_foreground_for_composition(
         image=raw_foreground,
@@ -1116,340 +1172,10 @@ def prepare_drag_canvas(background_image, foreground_image, mask_mode, white_bg_
     )
     fg_w, fg_h = resized_fg.size
 
-    canvas_scale = min(980 / bg_w, 680 / bg_h, 1.0)
-    canvas_w = int(bg_w * canvas_scale)
-    canvas_h = int(bg_h * canvas_scale)
-    display_fg_w = int(fg_w * canvas_scale)
-    display_fg_h = int(fg_h * canvas_scale)
-
     init_x = max(0, (bg_w - fg_w) // 2)
     init_y = max(0, bg_h - fg_h - int(bg_h * 0.08))
 
-    bg_url = pil_to_data_url(background)
-    fg_url = pil_to_data_url(resized_fg)
-
-    # 关键改动：
-    # 不再直接把 <script> 塞进 gr.HTML。
-    # 改为 iframe srcdoc，让脚本在 iframe 内稳定执行。
-    srcdoc = f"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-<style>
-  :root {{
-    --ink: #172033;
-    --muted: #708099;
-    --line: rgba(148, 163, 184, 0.26);
-    --primary: #5b8def;
-    --primary2: #77c8e8;
-    --panel: rgba(255,255,255,0.78);
-  }}
-  html, body {{
-    margin: 0;
-    padding: 0;
-    background:
-      radial-gradient(circle at 8% 0%, rgba(119, 200, 232, 0.22), transparent 32%),
-      linear-gradient(180deg, #f8fbff, #f3f6fb);
-    font-family: Inter, Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
-    color: var(--ink);
-  }}
-  .panel {{
-    box-sizing: border-box;
-    border: 1px solid rgba(255,255,255,0.82);
-    padding: 22px;
-    border-radius: 28px;
-    background:
-      radial-gradient(circle at top left, rgba(91,141,239,0.10), transparent 34%),
-      linear-gradient(145deg, rgba(255,255,255,0.92), rgba(248,252,255,0.68));
-    box-shadow: 0 20px 46px rgba(115,135,176,0.14);
-    backdrop-filter: blur(16px) saturate(130%);
-  }}
-  .titlebar {{
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 16px;
-  }}
-  .title {{
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-weight: 820;
-    letter-spacing: -0.02em;
-  }}
-  .title::before {{
-    content: "";
-    width: 12px;
-    height: 12px;
-    border-radius: 999px;
-    background: linear-gradient(135deg, var(--primary), var(--primary2));
-    box-shadow: 0 0 0 6px rgba(91,141,239,0.10);
-  }}
-  .tips {{
-    font-size: 14px;
-    color: var(--muted);
-    line-height: 1.65;
-    margin-bottom: 18px;
-  }}
-  .chip {{
-    display: inline-flex;
-    align-items: center;
-    padding: 7px 10px;
-    border-radius: 999px;
-    background: rgba(91,141,239,0.09);
-    color: #3d69c6;
-    font-size: 12px;
-    font-weight: 760;
-    white-space: nowrap;
-  }}
-  #stage {{
-    position: relative;
-    width: {canvas_w}px;
-    height: {canvas_h}px;
-    max-width: 100%;
-    border: 1px solid rgba(163,198,235,0.42);
-    border-radius: 24px;
-    background:
-      radial-gradient(circle at 12% 16%, rgba(91,141,239,0.10), transparent 26%),
-      radial-gradient(circle at 84% 10%, rgba(119,200,232,0.08), transparent 22%),
-      #ffffff;
-    overflow: hidden;
-    user-select: none;
-    touch-action: none;
-    box-shadow:
-      inset 0 1px 0 rgba(255,255,255,0.96),
-      0 22px 42px rgba(113,135,181,0.16),
-      0 0 0 10px rgba(91,141,239,0.05);
-  }}
-  #stage::after {{
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.42);
-    border-radius: 24px;
-  }}
-  #bg {{
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: {canvas_w}px;
-    height: {canvas_h}px;
-    pointer-events: none;
-  }}
-  #fg {{
-    position: absolute;
-    left: {int(init_x * canvas_scale)}px;
-    top: {int(init_y * canvas_scale)}px;
-    width: {display_fg_w}px;
-    height: {display_fg_h}px;
-    cursor: grab;
-    touch-action: none;
-    filter: drop-shadow(0 18px 24px rgba(15,23,42,0.16));
-  }}
-  #box {{
-    position: absolute;
-    left: {int(init_x * canvas_scale)}px;
-    top: {int(init_y * canvas_scale)}px;
-    width: {display_fg_w}px;
-    height: {display_fg_h}px;
-    border: 2px solid rgba(91,141,239,0.92);
-    border-radius: 18px;
-    box-sizing: border-box;
-    pointer-events: none;
-    box-shadow: 0 0 0 6px rgba(91,141,239,0.12), 0 0 28px rgba(119,200,232,0.24);
-  }}
-  #status {{
-    font-size: 14px;
-    color: #465772;
-    margin-top: 12px;
-    padding: 13px 14px;
-    border-radius: 16px;
-    background: rgba(255,255,255,0.70);
-    border: 1px solid rgba(148,163,184,0.18);
-  }}
-</style>
-</head>
-<body>
-<div class="panel">
-  <div class="title">拖拽交互画布</div>
-  <div class="tips">
-    操作：鼠标按住物体拖动；也可以点击背景中的任意位置，将物体中心移动到该处。
-    调整好位置后，点击页面下方“记录当前拖拽位置为候选”。
-  </div>
-
-  <div id="stage">
-    <img id="bg" src="{bg_url}" />
-    <img id="fg" src="{fg_url}" />
-    <div id="box"></div>
-  </div>
-
-  <div id="status">当前位置：x={init_x}, y={init_y}, scale={float(scale):.3f}</div>
-</div>
-
-<script>
-(function() {{
-  const stage = document.getElementById("stage");
-  const fg = document.getElementById("fg");
-  const box = document.getElementById("box");
-  const status = document.getElementById("status");
-
-  const canvasScale = {canvas_scale};
-  const stageW = {canvas_w};
-  const stageH = {canvas_h};
-  const fgW = {display_fg_w};
-  const fgH = {display_fg_h};
-  const originalFgW = {fg_w};
-  const originalFgH = {fg_h};
-  const currentScale = {float(scale)};
-
-  let x = {int(init_x * canvas_scale)};
-  let y = {int(init_y * canvas_scale)};
-  let dragging = false;
-  let offsetX = 0;
-  let offsetY = 0;
-
-  window.smartplaceLocalDragState = {{
-    x: Math.round(x / canvasScale),
-    y: Math.round(y / canvasScale),
-    scale: currentScale
-  }};
-  window.getSmartPlaceDragState = function() {{
-    return window.smartplaceLocalDragState;
-  }};
-
-  function findInputInParent(elemId) {{
-    try {{
-      const root = parent.document.getElementById(elemId);
-      if (!root) return null;
-      return root.querySelector("textarea, input");
-    }} catch (e) {{
-      return null;
-    }}
-  }}
-
-  function setParentValue(elemId, value) {{
-    const input = findInputInParent(elemId);
-    if (!input) return;
-    input.value = String(value);
-    input.dispatchEvent(new Event("input", {{ bubbles: true }}));
-    input.dispatchEvent(new Event("change", {{ bubbles: true }}));
-  }}
-
-  function clamp() {{
-    x = Math.max(0, Math.min(stageW - fgW, x));
-    y = Math.max(0, Math.min(stageH - fgH, y));
-  }}
-
-  function update() {{
-    clamp();
-
-    fg.style.left = x + "px";
-    fg.style.top = y + "px";
-    box.style.left = x + "px";
-    box.style.top = y + "px";
-
-    const ox = Math.round(x / canvasScale);
-    const oy = Math.round(y / canvasScale);
-
-    setParentValue("drag_x_input", ox);
-    setParentValue("drag_y_input", oy);
-    setParentValue("drag_scale_input", currentScale);
-
-    window.smartplaceLocalDragState = {{
-      x: ox,
-      y: oy,
-      scale: currentScale
-    }};
-
-    try {{
-      parent.postMessage({{
-        type: "smartplace-drag-update",
-        x: ox,
-        y: oy,
-        scale: currentScale
-      }}, "*");
-    }} catch (e) {{}}
-
-    status.innerText =
-      "当前位置：x=" + ox +
-      ", y=" + oy +
-      ", scale=" + currentScale.toFixed(3) +
-      "；物体尺寸≈" + originalFgW + "×" + originalFgH;
-  }}
-
-  function pointerPosition(evt) {{
-    const rect = stage.getBoundingClientRect();
-    const sx = stageW / rect.width;
-    const sy = stageH / rect.height;
-    return {{
-      x: (evt.clientX - rect.left) * sx,
-      y: (evt.clientY - rect.top) * sy
-    }};
-  }}
-
-  stage.addEventListener("pointerdown", function(evt) {{
-    const p = pointerPosition(evt);
-
-    const inside =
-      p.x >= x && p.x <= x + fgW &&
-      p.y >= y && p.y <= y + fgH;
-
-    if (inside) {{
-      offsetX = p.x - x;
-      offsetY = p.y - y;
-    }} else {{
-      x = p.x - fgW / 2;
-      y = p.y - fgH / 2;
-      offsetX = fgW / 2;
-      offsetY = fgH / 2;
-    }}
-
-    dragging = true;
-    stage.setPointerCapture(evt.pointerId);
-    fg.style.cursor = "grabbing";
-    update();
-    evt.preventDefault();
-  }});
-
-  stage.addEventListener("pointermove", function(evt) {{
-    if (!dragging) return;
-    const p = pointerPosition(evt);
-    x = p.x - offsetX;
-    y = p.y - offsetY;
-    update();
-    evt.preventDefault();
-  }});
-
-  stage.addEventListener("pointerup", function(evt) {{
-    dragging = false;
-    fg.style.cursor = "grab";
-    update();
-    evt.preventDefault();
-  }});
-
-  stage.addEventListener("pointercancel", function(evt) {{
-    dragging = false;
-    fg.style.cursor = "grab";
-    update();
-  }});
-
-  update();
-}})();
-</script>
-</body>
-</html>
-"""
-
-    iframe_html = f"""
-<iframe
-  id="smartplace_drag_iframe"
-  srcdoc="{html_lib.escape(srcdoc, quote=True)}"
-  style="width:100%; height:{canvas_h + 190}px; border:0; border-radius:28px; background:transparent; box-shadow:0 24px 58px rgba(31,41,55,0.13);"
-></iframe>
-"""
+    iframe_html = _build_drag_canvas_html(background, foreground, scale, init_x, init_y)
 
     candidate_points = []
     candidate_df = pd.DataFrame(columns=["候选编号", "x", "y", "scale"])
@@ -1492,6 +1218,552 @@ def add_current_candidate(candidate_points, drag_x, drag_y, drag_scale):
 def clear_candidates():
     return [], pd.DataFrame(columns=["候选编号", "x", "y", "scale"])
 
+def update_canvas_scale(bg_state, fg_state, drag_x, drag_y, new_scale):
+    """当前景缩放比例改变时，实时更新画布，并自动修正越界位置。"""
+    new_scale = format_param_value(new_scale,2)
+    if bg_state is None or fg_state is None:
+        return gr.update(), str(drag_x), str(drag_y), str(new_scale), new_scale, new_scale
+
+    background = bg_state.convert("RGB")
+    foreground = fg_state.convert("RGBA")
+
+    try:
+        cur_x = int(float(drag_x))
+        cur_y = int(float(drag_y))
+    except (ValueError, TypeError):
+        cur_x = 0
+        cur_y = 0
+
+    bg_w, bg_h = background.size
+
+    # 计算新缩放下的前景尺寸
+    new_fg = resize_foreground(foreground, scale=float(new_scale), bg_width=bg_w, bg_height=bg_h)
+    new_fg_w, new_fg_h = new_fg.size
+
+    # 前景尺寸与背景比例失调警告
+    fg_size_warn = check_foreground_size(new_fg_w, new_fg_h, bg_w, bg_h)
+    if fg_size_warn:
+        gr.Warning(fg_size_warn)
+
+    # 边界修正
+    adj_x = cur_x
+    adj_y = cur_y
+
+    # 右侧越界
+    if adj_x + new_fg_w > bg_w:
+        adj_x = bg_w - new_fg_w
+    # 左侧越界（负值）
+    if adj_x < 0:
+        adj_x = 0
+    # 下侧越界
+    if adj_y + new_fg_h > bg_h:
+        adj_y = bg_h - new_fg_h
+    # 上侧越界（负值）
+    if adj_y < 0:
+        adj_y = 0
+
+    # 如果前景比背景还大（极端情况），居中
+    if new_fg_w >= bg_w:
+        adj_x = max(0, (bg_w - new_fg_w) // 2)
+    if new_fg_h >= bg_h:
+        adj_y = max(0, (bg_h - new_fg_h) // 2)
+
+    iframe_html = _build_drag_canvas_html(background, foreground, new_scale, adj_x, adj_y)
+    return iframe_html, str(adj_x), str(adj_y), str(new_scale), new_scale
+
+def on_background_change(background_image):
+    """
+    当用户上传或选择背景图时，立即检测是否为纯色/近纯色。
+    如果是，弹出错误提示，清空背景图，阻止后续加载画布。
+    """
+    logger.log(f"[DEBUG]Background image changed, checking quality...")
+    if background_image is None:
+        logger.log(f"[DEBUG]Background image is None, skip quality check.")
+        return background_image
+
+    background = Image.fromarray(background_image).convert("RGB")
+    logger.log(f"[DEBUG]Background image quality check triggered.")
+    bg_warn = check_background_quality(background)
+
+    if bg_warn:
+        logger.log(f"[DEBUG]Background image quality warning: {bg_warn}")
+        gr.Warning(bg_warn)
+        return None
+    logger.log(f"[DEBUG]Background image quality passed.")
+    return background_image
+
+
+def run_auto_search(
+        bg_state,
+        fg_state,
+        mask_info_state,
+        candidate_points,
+        scale,
+        determine_coeff,
+        auto_coarse_n,
+        auto_coarse_m,
+        auto_samples_per_cell,
+        auto_fine_a,
+        auto_fine_b,
+        source_html
+):
+    """运行自动搜索，将最优位置呈现在画布上并加入候选列表。"""
+    if bg_state is None or fg_state is None:
+        raise gr.Error('请先点击"加载拖拽画布"。')
+    autocfg = cfg.get("auto_search", {})
+    background = bg_state.convert("RGB")
+    foreground = fg_state.convert("RGBA")
+    scale = float(scale)
+    determine_coeff = autocfg.get("determine_coeff", 1)
+    auto_coarse_n = autocfg.get("coarse_n", 4)
+    auto_coarse_m = autocfg.get("coarse_m", 4)
+    auto_samples_per_cell = autocfg.get("samples_per_cell", 3)
+    auto_fine_a = autocfg.get("fine_a", 5)
+    auto_fine_b = autocfg.get("fine_b", 5)
+
+    logger.section("[SmartPlace-AutoSearch] Start auto candidate area search")
+
+        # 调用自动搜索接口（参数优先级：显式 > 配置文件 > 默认值）
+    search_result = auto_candidate_area_search(
+        background=background,
+        foreground=foreground,
+        scorer=scorer,
+        n=int(auto_coarse_n),
+        m=int(auto_coarse_m),
+        r=int(auto_samples_per_cell),
+        a=int(auto_fine_a),
+        b=int(auto_fine_b),
+        determine_coeff=determine_coeff,
+        scale=scale,
+        logger=logger,
+    )
+
+    best = search_result.get("best")
+    top_k = search_result.get("top_k", [])
+    summary = search_result.get("search_summary", {})
+
+    if best is None:
+        no_cand_warn = check_no_candidates([])
+        raise gr.Error(no_cand_warn or "自动搜索未找到有效位置，请检查前景/背景是否已加载。")
+
+    best_x = int(best["x"] or 0)
+    best_y = int(best["y"] or 0)
+    best_score = best["score"] or 0.0
+
+    logger.log(f"[AutoSearch] Best position: x={best_x}, y={best_y}, score={best_score:.6f}")
+
+        # 重建画布，将前景移到最优位置
+    iframe_html = _build_drag_canvas_html(background, foreground, scale, best_x, best_y)
+    if iframe_html is None:
+        iframe_html = source_html
+
+        # 将 top_k 全部加入候选列表（画布只呈现 #1 位置）
+    candidate_points = list(candidate_points or [])
+    existing_count = len(candidate_points)
+
+    for idx, item in enumerate(top_k):
+        cid = existing_count + idx + 1
+        candidate_points.append({
+            "id": cid,
+            "x": int(item["x"]),
+            "y": int(item["y"]),
+            "scale": scale,
+        })
+
+    candidate_df = pd.DataFrame([
+        {"候选编号": p["id"], "x": p["x"], "y": p["y"], "scale": p["scale"]}
+        for p in candidate_points
+    ])
+    if candidate_df is None:
+        candidate_df = pd.DataFrame([{"候选编号": 1, "x": 0, "y": 0, "scale": scale}])
+
+    drag_mode = (
+        f"自动搜索完成：粗搜索 {summary.get('coarse_grid', '?')} → "
+        f"细搜索 {summary.get('fine_grid', '?')}，"
+        f"determine_coeff={determine_coeff}，"
+        f"最优位置=({best_x}, {best_y})，分数={best_score:.4f}。"
+        f"已将 Top-{len(top_k)} 结果加入候选列表。"
+    )
+
+    return (
+        iframe_html,
+        candidate_points,
+        candidate_df,
+        str(best_x),
+        str(best_y),
+        str(scale),
+        drag_mode,
+    )
+
+
+def _build_drag_canvas_html(background, foreground_rgba, scale, init_x, init_y, bg_warning:Optional[str]=None):
+    """
+    构建拖拽画布 iframe HTML，前景初始位置为 (init_x, init_y)。
+    供 prepare_drag_canvas 和 run_auto_search 共用。
+
+    画布自适应容器宽度，保持背景图宽高比居中显示；
+    内部坐标统一使用百分比，确保容器缩放时拖动依然跟手。
+    """
+    bg_w, bg_h = background.size
+
+    resized_fg = resize_foreground(
+        foreground=foreground_rgba,
+        scale=float(scale),
+        bg_width=bg_w,
+        bg_height=bg_h,
+    )
+    fg_w, fg_h = resized_fg.size
+
+    bg_url = pil_to_data_url(background)
+    fg_url = pil_to_data_url(resized_fg)
+
+    # 百分比定位值（相对于背景图原始尺寸）
+    fg_left_pct = init_x / bg_w * 100
+    fg_top_pct = init_y / bg_h * 100
+    fg_w_pct = fg_w / bg_w * 100
+    fg_h_pct = fg_h / bg_h * 100
+
+    srcdoc = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+:root {{
+--ink: #172033;
+--muted: #708099;
+--primary: #5b8def;
+--primary2: #77c8e8;
+}}
+html, body {{
+margin: 0;
+padding: 0;
+background:
+  radial-gradient(circle at 8% 0%, rgba(119, 200, 232, 0.22), transparent 32%),
+  linear-gradient(180deg, #f8fbff, #f3f6fb);
+font-family: Inter, Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+color: var(--ink);
+}}
+.panel {{
+box-sizing: border-box;
+border: 1px solid rgba(255,255,255,0.82);
+padding: 22px;
+border-radius: 28px;
+background:
+  radial-gradient(circle at top left, rgba(91,141,239,0.10), transparent 34%),
+  linear-gradient(145deg, rgba(255,255,255,0.92), rgba(248,252,255,0.68));
+box-shadow: 0 20px 46px rgba(115,135,176,0.14);
+backdrop-filter: blur(16px) saturate(130%);
+}}
+.title {{
+display: flex;
+align-items: center;
+gap: 10px;
+font-weight: 820;
+letter-spacing: -0.02em;
+margin-bottom: 16px;
+}}
+.title::before {{
+content: "";
+width: 12px;
+height: 12px;
+border-radius: 999px;
+background: linear-gradient(135deg, var(--primary), var(--primary2));
+box-shadow: 0 0 0 6px rgba(91,141,239,0.10);
+}}
+.tips {{
+font-size: 14px;
+color: var(--muted);
+line-height: 1.65;
+margin-bottom: 18px;
+}}
+/* ---- 画布外壳：宽度 100%，居中 ---- */
+#canvas-outer {{
+width: 100%;
+display: flex;
+justify-content: center;
+}}
+#stage {{
+position: relative;
+width: 100%;
+max-width: 980px;
+aspect-ratio: {bg_w} / {bg_h};
+border: 1px solid rgba(163,198,235,0.42);
+border-radius: 24px;
+background:
+  radial-gradient(circle at 12% 16%, rgba(91,141,239,0.10), transparent 26%),
+  radial-gradient(circle at 84% 10%, rgba(119,200,232,0.08), transparent 22%),
+  #ffffff;
+overflow: hidden;
+user-select: none;
+touch-action: none;
+box-shadow:
+  inset 0 1px 0 rgba(255,255,255,0.96),
+  0 22px 42px rgba(113,135,181,0.16),
+  0 0 0 10px rgba(91,141,239,0.05);
+}}
+#stage::after {{
+content: "";
+position: absolute;
+inset: 0;
+pointer-events: none;
+box-shadow: inset 0 0 0 1px rgba(255,255,255,0.42);
+border-radius: 24px;
+}}
+#bg {{
+position: absolute;
+left: 0;
+top: 0;
+width: 100%;
+height: 100%;
+pointer-events: none;
+}}
+#fg {{
+position: absolute;
+left: {fg_left_pct:.6f}%;
+top: {fg_top_pct:.6f}%;
+width: {fg_w_pct:.6f}%;
+height: {fg_h_pct:.6f}%;
+cursor: grab;
+touch-action: none;
+filter: drop-shadow(0 18px 24px rgba(15,23,42,0.16));
+}}
+#box {{
+position: absolute;
+left: {fg_left_pct:.6f}%;
+top: {fg_top_pct:.6f}%;
+width: {fg_w_pct:.6f}%;
+height: {fg_h_pct:.6f}%;
+border: 2px solid rgba(91,141,239,0.92);
+border-radius: 18px;
+box-sizing: border-box;
+pointer-events: none;
+box-shadow: 0 0 0 6px rgba(91,141,239,0.12), 0 0 28px rgba(119,200,232,0.24);
+}}
+#status {{
+font-size: 14px;
+color: #465772;
+margin-top: 12px;
+padding: 13px 14px;
+border-radius: 16px;
+background: rgba(255,255,255,0.70);
+border: 1px solid rgba(148,163,184,0.18);
+}}
+</style>
+</head>
+<body>
+<div class="panel">
+<div class="title">拖拽交互画布</div>
+<div class="tips">
+操作：鼠标按住物体拖动；也可以点击背景中的任意位置，将物体中心移动到该处。
+调整好位置后，点击页面下方"记录当前拖拽位置为候选"。
+</div>
+
+  <div id="canvas-outer">
+    <div id="stage">
+      <img id="bg" src="{bg_url}" />
+      <img id="fg" src="{fg_url}" />
+      <div id="box"></div>
+    </div>
+  </div>
+
+  <div id="status">当前位置：x={init_x}, y={init_y}, scale={float(scale):.3f}</div>
+</div>
+
+<script>
+(function() {{
+  const stage = document.getElementById("stage");
+  const fg = document.getElementById("fg");
+  const box = document.getElementById("box");
+  const status = document.getElementById("status");
+
+  /* ---- 内部逻辑坐标系：与背景图原始像素 1:1 对应 ---- */
+  const bgW = {bg_w};
+  const bgH = {bg_h};
+  const fgW = {fg_w};
+  const fgH = {fg_h};
+  const currentScale = {float(scale)};
+
+  /* ---- 当前前景位置（逻辑坐标，即背景像素坐标） ---- */
+  let logicX = {init_x};
+  let logicY = {init_y};
+  let dragging = false;
+  let offsetLogicX = 0;
+  let offsetLogicY = 0;
+
+  window.smartplaceLocalDragState = {{
+    x: logicX,
+    y: logicY,
+    scale: currentScale
+  }};
+  window.getSmartPlaceDragState = function() {{
+    return window.smartplaceLocalDragState;
+  }};
+
+  function findInputInParent(elemId) {{
+    try {{
+      const root = parent.document.getElementById(elemId);
+      if (!root) return null;
+      return root.querySelector("textarea, input");
+    }} catch (e) {{
+      return null;
+    }}
+  }}
+
+  function setParentValue(elemId, value) {{
+    const input = findInputInParent(elemId);
+    if (!input) return;
+    input.value = String(value);
+    input.dispatchEvent(new Event("input", {{ bubbles: true }}));
+    input.dispatchEvent(new Event("change", {{ bubbles: true }}));
+  }}
+
+  function clamp() {{
+    logicX = Math.max(0, Math.min(bgW - fgW, logicX));
+    logicY = Math.max(0, Math.min(bgH - fgH, logicY));
+  }}
+
+  function checkPlacementNaturality(ox, oy, fw, fh, bw, bh) {{
+    const bottomY = oy + fh;
+    const bottomRatio = bottomY / bh;
+    const centerX = ox + fw / 2;
+    const centerXRatio = centerX / bw;
+    let hints = [];
+    if (bottomRatio < 0.45) {{
+      hints.push("物体悬空，建议放在靠近地面的位置");
+    }}
+    if (centerXRatio < 0.12 || centerXRatio > 0.88) {{
+      hints.push("物体过于靠边");
+    }}
+    if (ox < 0 || oy < 0 || ox + fw > bw || oy + fh > bh) {{
+      hints.push("物体越出画面边界");
+    }}
+    return hints;
+  }}
+
+  /* 将逻辑坐标转为 CSS 百分比并应用到 DOM */
+  function applyPosition() {{
+    const leftPct = (logicX / bgW * 100).toFixed(6) + "%";
+    const topPct  = (logicY / bgH * 100).toFixed(6) + "%";
+    fg.style.left = leftPct;
+    fg.style.top  = topPct;
+    box.style.left = leftPct;
+    box.style.top  = topPct;
+  }}
+
+  function update() {{
+    clamp();
+    applyPosition();
+
+    const ox = Math.round(logicX);
+    const oy = Math.round(logicY);
+
+    setParentValue("drag_x_input", ox);
+    setParentValue("drag_y_input", oy);
+    setParentValue("drag_scale_input", currentScale);
+
+    window.smartplaceLocalDragState = {{
+      x: ox,
+      y: oy,
+      scale: currentScale
+    }};
+
+    try {{
+      parent.postMessage({{
+        type: "smartplace-drag-update",
+        x: ox,
+        y: oy,
+        scale: currentScale
+      }}, "*");
+    }} catch (e) {{}}
+
+    const hints = checkPlacementNaturality(ox, oy, fgW, fgH, bgW, bgH);
+
+    let statusText = "当前位置：x=" + ox + ", y=" + oy + ", scale=" + currentScale.toFixed(3);
+
+    if (hints.length > 0) {{
+      statusText += "  ⚠ " + hints.join("；");
+      status.style.borderColor = "rgba(224,122,122,0.50)";
+      status.style.background = "rgba(255,245,245,0.85)";
+    }} else {{
+      status.style.borderColor = "rgba(148,163,184,0.18)";
+      status.style.background = "rgba(255,255,255,0.70)";
+    }}
+
+    status.innerText = statusText + "；物体尺寸≈" + fgW + "×" + fgH;
+  }}
+
+  /* 将屏幕鼠标坐标转换为逻辑坐标 */
+  function screenToLogic(evt) {{
+    const rect = stage.getBoundingClientRect();
+    return {{
+      x: (evt.clientX - rect.left) / rect.width  * bgW,
+      y: (evt.clientY - rect.top)  / rect.height * bgH
+    }};
+  }}
+
+  stage.addEventListener("pointerdown", function(evt) {{
+    const p = screenToLogic(evt);
+
+    const inside =
+      p.x >= logicX && p.x <= logicX + fgW &&
+      p.y >= logicY && p.y <= logicY + fgH;
+
+    if (inside) {{
+      offsetLogicX = p.x - logicX;
+      offsetLogicY = p.y - logicY;
+    }} else {{
+      logicX = p.x - fgW / 2;
+      logicY = p.y - fgH / 2;
+      offsetLogicX = fgW / 2;
+      offsetLogicY = fgH / 2;
+    }}
+
+    dragging = true;
+    stage.setPointerCapture(evt.pointerId);
+    fg.style.cursor = "grabbing";
+    update();
+    evt.preventDefault();
+  }});
+
+  stage.addEventListener("pointermove", function(evt) {{
+    if (!dragging) return;
+    const p = screenToLogic(evt);
+    logicX = p.x - offsetLogicX;
+    logicY = p.y - offsetLogicY;
+    update();
+    evt.preventDefault();
+  }});
+
+  stage.addEventListener("pointerup", function(evt) {{
+    dragging = false;
+    fg.style.cursor = "grab";
+    update();
+    evt.preventDefault();
+  }});
+
+  stage.addEventListener("pointercancel", function(evt) {{
+    dragging = false;
+    fg.style.cursor = "grab";
+    update();
+  }});
+
+  update();
+}})();
+</script>
+</body>
+</html>
+"""
+
+    iframe_html = f"""
+<iframe
+  id="smartplace_drag_iframe"
+  srcdoc="{html_lib.escape(srcdoc, quote=True)}"
+  style="width:100%; height:600px; border:0; border-radius:28px; background:transparent; box-shadow:0 24px 58px rgba(31,41,55,0.13);"
+></iframe>
+"""
+
+    return iframe_html
 
 def as_enabled(value) -> bool:
     if isinstance(value, bool):
@@ -1559,6 +1831,25 @@ def score_drag_candidates(
     candidate_infos = []
     candidates = []
 
+    resized_fg_for_check = resize_foreground(
+        foreground, scale=float(candidate_points[0]["scale"]),
+        bg_width=background.size[0], bg_height=background.size[1],
+    ) if candidate_points else None
+
+    if resized_fg_for_check is not None:
+        run_warnings = collect_run_warnings(
+            fg_width=resized_fg_for_check.size[0],
+            fg_height=resized_fg_for_check.size[1],
+            bg_width=background.size[0],
+            bg_height=background.size[1],
+            candidates=None,  # 候选还没合成，暂不检测空候选
+        )
+    else:
+        run_warnings = collect_run_warnings(
+            fg_width=0, fg_height=0,
+            bg_width=background.size[0], bg_height=background.size[1],
+        )
+
     for p in candidate_points:
         composite, composite_mask, info = compose_image_with_mask(
             background=background,
@@ -1602,6 +1893,15 @@ def score_drag_candidates(
             "saved_path": None,
         }
         results.append(result)
+
+    if not results:
+        no_cand_warn = check_no_candidates([])
+        if no_cand_warn and no_cand_warn not in run_warnings:
+            run_warnings.append(no_cand_warn)
+    if run_warnings:
+        logger.section("[SmartPlace-Drag] Run Warnings")
+        for w in run_warnings:
+            logger.log(f"[Warning] {w}")
 
     ranked_all = assign_relative_labels_in_place(results, top_k=top_k)
     ranked = ranked_all[:top_k]
@@ -1717,6 +2017,7 @@ def score_drag_candidates(
         mask_info=mask_info,
         drag_mode=drag_mode_state or "用户拖拽前景物体并记录候选位置。",
         explanation_text=explanation_text,
+        run_warnings=run_warnings if run_warnings else None,
     )
 
     model_info = scorer.get_model_info()
@@ -1734,6 +2035,7 @@ def score_drag_candidates(
         log_path=log_path,
         explanation_path=explanation_overlay_path,
         explanation_report_path=explanation_report_path,
+        run_warnings=run_warnings if run_warnings else None,
     )
 
     metadata_path = export_result_package_metadata(
@@ -1774,6 +2076,17 @@ def score_drag_candidates(
     case_summary_df = summarize_case_records(all_case_records)
     case_summary_csv_path = export_case_summary_csv(records=all_case_records, output_dir=REPORT_RESULT_DIR)
     case_summary_md_path = export_case_summary_markdown(records=all_case_records, output_dir=REPORT_RESULT_DIR)
+    collected_files = [
+        csv_path,
+        log_path,
+        report_path,
+        metadata_path,
+        explanation_report_path,
+        case_record_path,
+        case_summary_csv_path,
+        case_summary_md_path
+    ]
+    zip_path = zip_folder(files=collected_files)
 
     logger.log("[SmartPlace-Drag] Inference finished.")
     logger.log(f"[Output] score_table_saved={csv_path}")
@@ -1783,6 +2096,7 @@ def score_drag_candidates(
     logger.log(f"[Output] case_summary_csv={case_summary_csv_path}")
     logger.log(f"[Output] case_summary_md={case_summary_md_path}")
     logger.log(f"[Output] log_file={log_path}")
+    logger.log(f"[Output] zip_file={zip_path}")
 
     return (
         gallery_items,
@@ -1803,6 +2117,7 @@ def score_drag_candidates(
         case_record_path,
         case_summary_csv_path,
         case_summary_md_path,
+        zip_path,
     )
 
 
@@ -1819,8 +2134,8 @@ with gr.Blocks(
     title="SmartPlace Studio · 智能物体放置展示平台",
     fill_width=True,
 ) as demo:
-    preset_foregrounds = collect_preset_images(os.path.join("assets", "foregrounds"), limit=6)
-    preset_backgrounds = collect_preset_images(os.path.join("assets", "backgrounds"), limit=6)
+    preset_foregrounds = collect_preset_images(os.path.join("assets", "foregrounds"))
+    preset_backgrounds = collect_preset_images(os.path.join("assets", "backgrounds"))
     bg_state = gr.State(value=None)
     fg_state = gr.State(value=None)
     mask_info_state = gr.State(value={})
@@ -1904,6 +2219,7 @@ with gr.Blocks(
                             label="预制背景图片",
                         )
 
+
                     case_name_input = gr.State("SmartPlace 工作台案例")
                     background_note_input = gr.State("")
                     foreground_note_input = gr.State("")
@@ -1919,6 +2235,8 @@ with gr.Blocks(
                             add_candidate_button = gr.Button("记录当前位置为候选", variant="primary", elem_classes=["sp-blue"])
                         with gr.Row():
                             clear_candidate_button = gr.Button("清空候选", variant="primary", elem_classes=["sp-blue"])
+                            auto_search_button = gr.Button("🔍 自动搜索最优位置", variant="primary", elem_classes=["sp-green"])
+                        with gr.Row():
                             score_button = gr.Button("批量评分并生成结果", variant="primary", elem_classes=["sp-blue"])
 
                     with gr.Row(equal_height=False):
@@ -2057,6 +2375,7 @@ with gr.Blocks(
         with gr.Tab("04 · 导出与复现", id="exports"):
             with gr.Column(elem_classes=["sp-card", "sp-file-row"]):
                 gr.HTML("<div class='sp-section-title'>导出文件中心</div><div class='sp-subtitle'>每次评分后自动生成评分表、日志、运行报告、元信息和案例记录。</div>")
+                zip_file = gr.File(label="报告压缩包")
                 with gr.Row():
                     csv_file = gr.File(label="评分 CSV")
                     log_file = gr.File(label="推理日志")
@@ -2070,7 +2389,11 @@ with gr.Blocks(
                     case_summary_md_file = gr.File(label="测试案例汇总 Markdown")
 
     white_bg_threshold_input.change(lambda value: format_param_value(value), inputs=white_bg_threshold_input, outputs=white_bg_threshold_display)
-    scale_input.change(lambda value: format_param_value(value, 2), inputs=scale_input, outputs=scale_display)
+    scale_input.change(
+        fn=update_canvas_scale,
+        inputs=[bg_state, fg_state, drag_x_input, drag_y_input,scale_input],
+        outputs=[drag_canvas_html, drag_x_input, drag_y_input, drag_scale_input, scale_display],
+    )
     top_k_input.change(lambda value: format_param_value(value), inputs=top_k_input, outputs=top_k_display)
     lbm_steps_input.change(lambda value: format_param_value(value), inputs=lbm_steps_input, outputs=lbm_steps_display)
     lbm_resolution_input.change(lambda value: format_param_value(value), inputs=lbm_resolution_input, outputs=lbm_resolution_display)
@@ -2107,6 +2430,33 @@ with gr.Blocks(
         fn=clear_candidates,
         inputs=[],
         outputs=[candidate_points_state, candidate_points_table],
+    )
+
+    auto_search_button.click(
+        fn=run_auto_search,
+        inputs=[
+            bg_state,
+            fg_state,
+            mask_info_state,
+            candidate_points_state,
+            scale_input,
+            # determine_coeff_input,
+            # auto_coarse_n_input,
+            # auto_coarse_m_input,
+            # auto_samples_per_cell_input,
+            # auto_fine_a_input,
+            # auto_fine_b_input,
+            # drag_canvas_html,
+        ],
+        outputs=[
+            drag_canvas_html,
+            candidate_points_state,
+            candidate_points_table,
+            drag_x_input,
+            drag_y_input,
+            drag_scale_input,
+            drag_mode_state,
+        ],
     )
 
     score_button.click(
@@ -2154,6 +2504,7 @@ with gr.Blocks(
             case_record_file,
             case_summary_csv_file,
             case_summary_md_file,
+            zip_file,
         ],
     )
 
