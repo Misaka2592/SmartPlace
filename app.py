@@ -75,6 +75,16 @@ def format_param_value(value: Any, digits: int = 0) -> str:
     return f"{num:.{digits}f}"
 
 
+def format_param_value(value: Any, digits: int = 0) -> str:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if digits <= 0:
+        return str(int(round(num)))
+    return f"{num:.{digits}f}"
+
+
 CUSTOM_DRAG_JS = """
 () => {
     window.smartplaceDragState = window.smartplaceDragState || {
