@@ -1062,6 +1062,59 @@ def add_current_candidate(candidate_points, drag_x, drag_y, drag_scale):
 def clear_candidates():
     return [], pd.DataFrame(columns=["候选编号", "x", "y", "scale"])
 
+def update_canvas_scale(bg_state, fg_state, drag_x, drag_y, old_scale, new_scale):
+    """当前景缩放比例改变时，实时更新画布，并自动修正越界位置。"""
+    if bg_state is None or fg_state is None:
+        # 画布未加载，不更新
+        return gr.update(), drag_x, drag_y, new_scale
+
+    background = bg_state.convert("RGB")
+    foreground = fg_state.convert("RGBA")
+    new_scale = float(new_scale)
+    old_scale = float(old_scale)
+
+    try:
+        cur_x = int(float(drag_x))
+        cur_y = int(float(drag_y))
+    except (ValueError, TypeError):
+        cur_x = 0
+        cur_y = 0
+
+    bg_w, bg_h = background.size
+
+    # 计算新缩放下的前景尺寸
+    new_fg = resize_foreground(foreground, scale=new_scale, bg_width=bg_w, bg_height=bg_h)
+    new_fg_w, new_fg_h = new_fg.size
+
+    # 边界修正
+    # 1. 若放大后右/下越界 → 向左/上平移到紧贴边界
+    # 2. 若缩小后前景完全在画面外 → 平移到边界内
+    adj_x = cur_x
+    adj_y = cur_y
+
+    # 右侧越界：x + fg_w > bg_w → 移到 x = bg_w - fg_w
+    if adj_x + new_fg_w > bg_w:
+        adj_x = bg_w - new_fg_w
+    # 左侧越界（负值）
+    if adj_x < 0:
+        adj_x = 0
+    # 下侧越界：y + fg_h > bg_h → 移到 y = bg_h - fg_h
+    if adj_y + new_fg_h > bg_h:
+        adj_y = bg_h - new_fg_h
+    # 上侧越界（负值）
+    if adj_y < 0:
+        adj_y = 0
+
+    # 如果前景比背景还大（极端情况），居中
+    if new_fg_w >= bg_w:
+        adj_x = max(0, (bg_w - new_fg_w) // 2)
+    if new_fg_h >= bg_h:
+        adj_y = max(0, (bg_h - new_fg_h) // 2)
+
+    iframe_html = _build_drag_canvas_html(background, foreground, new_scale, adj_x, adj_y)
+
+    return iframe_html, str(adj_x), str(adj_y), new_scale
+
 def on_background_change(background_image):
     """
     当用户上传或选择背景图时，立即检测是否为纯色/近纯色。
@@ -1982,12 +2035,6 @@ with gr.Blocks(
                         )
                         gr.HTML("<div class='sp-section-title'>背景图片区域</div><div class='sp-subtitle'>预制背景图片 / 本地上传</div>")
                         background_input = gr.Image(label="背景图 Background", type="numpy", height=240)
-                        background_input.change(
-                            fn=on_background_change,
-                            inputs=[background_input],
-                            outputs=[background_input],
-                            trigger_mode="once",
-                        )
                         gr.Examples(
                             examples=preset_backgrounds,
                             inputs=background_input,
@@ -2046,6 +2093,7 @@ with gr.Blocks(
                             buttons=[],
                         )
                         scale_input = gr.Slider(minimum=0.05, maximum=0.8, value=0.25, step=0.05, label="前景缩放比例", buttons=[])
+
                         top_k_input = gr.Slider(minimum=1, maximum=5, value=3, step=1, label="Top-K 数量", buttons=[])
                         with gr.Accordion("自动搜索参数", open=True):
                             determine_coeff_input = gr.Slider(
@@ -2121,6 +2169,19 @@ with gr.Blocks(
                 with gr.Row():
                     case_summary_csv_file = gr.File(label="测试案例汇总 CSV")
                     case_summary_md_file = gr.File(label="测试案例汇总 Markdown")
+
+    background_input.change(
+        fn=on_background_change,
+        inputs=[background_input],
+        outputs=[background_input],
+        trigger_mode="once",
+    )
+
+    scale_input.change(
+        fn=update_canvas_scale,
+        inputs=[bg_state, fg_state, drag_x_input, drag_y_input, drag_scale_input, scale_input],
+        outputs=[drag_canvas_html, drag_x_input, drag_y_input, drag_scale_input],
+    )
 
     load_canvas_button.click(
         fn=prepare_drag_canvas,
